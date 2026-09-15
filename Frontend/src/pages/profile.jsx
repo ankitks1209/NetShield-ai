@@ -65,7 +65,7 @@ const Profile = () => {
     const fetchSessions = async () => {
       try {
         const token = localStorage.getItem('token') || localStorage.getItem('access_token');
-        const res = await fetch('http://localhost:8000/api/users/sessions', {
+        const res = await fetch('http://35.154.0.127:8000/api/users/sessions', {
           headers: {
             'Content-Type': 'application/json',
             ...(token ? { 'Authorization': `Bearer ${token}` } : {})
@@ -95,7 +95,7 @@ const Profile = () => {
     setSaveMessage(null);
     try {
       const token = localStorage.getItem('token') || localStorage.getItem('access_token');
-      const res = await fetch('http://localhost:8000/api/users/profile', {
+      const res = await fetch('http://35.154.0.127:8000/api/users/profile', {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -174,7 +174,7 @@ const Profile = () => {
     
     try {
       const token = localStorage.getItem('token') || localStorage.getItem('access_token');
-      const res = await fetch('http://localhost:8000/api/users/password', {
+      const res = await fetch('http://35.154.0.127:8000/api/users/password', {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',

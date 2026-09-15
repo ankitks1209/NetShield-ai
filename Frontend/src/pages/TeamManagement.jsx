@@ -46,7 +46,7 @@ const TeamManagement = () => {
       const headers = getAuthHeaders();
 
       // Fetch Users
-      const userRes = await fetch('http://localhost:8000/api/users', { headers });
+      const userRes = await fetch('http://35.154.0.127:8000/api/users', { headers });
       if (userRes.ok) {
         const userData = await userRes.json();
         if (userData.status === 'success') {
@@ -64,7 +64,7 @@ const TeamManagement = () => {
       }
       
       // Fetch Audit Logs
-      const auditRes = await fetch('http://localhost:8000/api/admin/audit-logs', { headers });
+      const auditRes = await fetch('http://35.154.0.127:8000/api/admin/audit-logs', { headers });
       if (auditRes.ok) {
         const auditData = await auditRes.json();
         setAuditLogs(auditData.logs || []);
@@ -91,7 +91,7 @@ const TeamManagement = () => {
     setInviteMessage(null);
 
     try {
-      const response = await fetch('http://localhost:8000/api/users/invite', {
+      const response = await fetch('http://35.154.0.127:8000/api/users/invite', {
         method: 'POST',
         headers: getAuthHeaders(),
         body: JSON.stringify({ email: inviteEmail, role: inviteRole })
@@ -132,7 +132,7 @@ const TeamManagement = () => {
     setEditMessage(null);
 
     try {
-      const response = await fetch(`http://localhost:8000/api/users/${editingUser.id}`, {
+      const response = await fetch(`http://35.154.0.127:8000/api/users/${editingUser.id}`, {
         method: 'PUT',
         headers: getAuthHeaders(),
         body: JSON.stringify({ 

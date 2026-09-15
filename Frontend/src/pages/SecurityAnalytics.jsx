@@ -21,13 +21,13 @@ const SecurityAnalytics = () => {
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const res = await fetch('http://localhost:8000/api/models/telemetry');
+        const res = await fetch('http://35.154.0.127:8000/api/models/telemetry');
         if (res.ok) {
           const data = await res.json();
           if (data.status === 'success') setTelemetry(data);
         }
 
-        const statusRes = await fetch('http://localhost:8000/api/models/retrain-status');
+        const statusRes = await fetch('http://35.154.0.127:8000/api/models/retrain-status');
         if (statusRes.ok) {
           const statusData = await statusRes.json();
           setPipelineState(statusData);
@@ -47,7 +47,7 @@ const SecurityAnalytics = () => {
   const handleForceRetraining = async () => {
     setRetrainMessage(null);
     try {
-      const res = await fetch('http://localhost:8000/api/models/retrain', {
+      const res = await fetch('http://35.154.0.127:8000/api/models/retrain', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' }
       });

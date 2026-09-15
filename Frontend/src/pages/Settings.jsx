@@ -7,7 +7,7 @@ const Settings = () => {
   
   const [activeTab, setActiveTab] = useState('System');
   const [settings, setSettings] = useState({
-    fastapiUrl: 'http://localhost:8000/api/v1',
+    fastapiUrl: 'http://35.154.0.127:8000/api/v1',
     retention: '30 Days',
     interface: 'en0 (MacBook Air Network)',
     promiscuous: true,
@@ -24,7 +24,7 @@ const Settings = () => {
   useEffect(() => {
     const fetchSettings = async () => {
       try {
-        const res = await fetch('http://localhost:8000/api/system/settings');
+        const res = await fetch('http://35.154.0.127:8000/api/system/settings');
         if (res.ok) {
           const data = await res.json();
           if (data.settings) {
@@ -42,7 +42,7 @@ const Settings = () => {
     setIsSaving(true);
     setSaveMessage(null);
     try {
-      const res = await fetch('http://localhost:8000/api/system/settings', {
+      const res = await fetch('http://35.154.0.127:8000/api/system/settings', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(settings)

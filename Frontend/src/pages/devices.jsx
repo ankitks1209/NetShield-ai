@@ -19,7 +19,7 @@ const Devices = () => {
   useEffect(() => {
     const fetchDevices = async () => {
       try {
-        const response = await fetch('http://localhost:8000/api/system/devices');
+        const response = await fetch('http://35.154.0.127:8000/api/system/devices');
         if (response.ok) {
           const data = await response.json();
           if (data.status === 'success') {

@@ -1,34 +1,35 @@
+
 version: '3.8'
 
 services:
   zeek:
     image: zeek/zeek:latest
     container_name: netshield_zeek
-    network_mode: "host" # Allows Zeek to hook directly into cloud network interfaces (eth0)
+    network_mode: "host"
+    working_dir: /var/log/zeek
     volumes:
       - zeek_logs:/var/log/zeek
-    command: ["zeek", "-i", "eth0", "local"]
+    command: ["zeek", "-C", "-i", "enp39s0", "local", "LogAscii::use_json=T"]
     restart: always
 
   backend:
-    build: .
-    ports:
-      - "8000:8000"
+    build: ./backend
+    network_mode: "host"
     environment:
-      - MONGO_URI=mongodb://mongodb:27017/netshield
-      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/netshield_db
+      - MONGO_URI=mongodb+srv://Ankit:Ankit1234@netsheildai.pvnpkaq.mongodb.net/?appName=NetSheildAI
+      - DATABASE_URL=postgresql://neondb_owner:npg_j2rAOMB3qnXF@ep-tiny-tree-azncs9cn-pooler.c-3.ap-southeast-1.aws.neon.tech/neondb?sslmode=require
     volumes:
-      - zeek_logs:/var/log/zeek:ro # Read-only access to Zeek logs
+      - zeek_logs:/var/log/zeek:ro
+      - ./ml:/ml:ro
+
     depends_on:
       - zeek
     restart: always
 
   frontend:
-    build: ./frontend
+    build: ./Frontend
     ports:
       - "5173:80"
-    depends_on:
-      - backend
     restart: always
 
 volumes:

@@ -29,8 +29,8 @@ except Exception as e:
     print(f"Warning: Stream Engine 2 failed: {e}")
 
 DATASETS = {
-    "cicids2017": os.path.join("..", "ml", "data", "processed", "cicids2017_clean.csv"),
-    "unsw-nb15": os.path.join("..", "ml", "data", "processed", "unsw_nb15_clean.csv")
+    "cicids2017": "/ml/data/processed/cicids2017_clean.csv",
+    "unsw-nb15": "/ml/data/processed/unsw_nb15_clean.csv"
 }
 
 def clean_packet_data(row_dict):
@@ -57,7 +57,7 @@ async def traffic_stream(websocket: WebSocket, dataset: str = "cicids2017"):
     await websocket.accept()
     
     if dataset == "live_network":
-        zeek_log_path = "conn.log"
+        zeek_log_path = "/var/log/zeek/conn.log"
         if not os.path.exists(zeek_log_path):
             await websocket.send_json({"error": "Zeek conn.log not found."})
             await websocket.close()
@@ -99,11 +99,13 @@ async def traffic_stream(websocket: WebSocket, dataset: str = "cicids2017"):
         return
 
     try:
-        df = pd.read_csv(csv_path) 
         while True:
-            for index, row in df.head(500).iterrows():
-                raw_packet = row.to_dict()
-                raw_packet["active_dataset"] = dataset
+            # Read 200 rows at a time to use almost zero RAM
+            for chunk in pd.read_csv(csv_path, chunksize=200):
+                chunk = chunk.fillna(0)
+                for index, row in chunk.iterrows():
+                    raw_packet = json.loads(row.to_json())
+                    raw_packet["active_dataset"] = dataset               
                 packet_data = clean_packet_data(raw_packet)
                 
                 try:

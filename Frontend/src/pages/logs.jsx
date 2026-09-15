@@ -21,7 +21,7 @@ const Logs = () => {
     if (isManual) setIsRefreshing(true);
     try {
       // Connects to your FastAPI backend to retrieve actual infrastructure/system logs
-      const response = await fetch('http://localhost:8000/api/logs');
+      const response = await fetch('http://35.154.0.127:8000/api/logs');
       if (response.ok) {
         const data = await response.json();
         if (data.status === 'success' && data.logs) {

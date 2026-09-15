@@ -20,7 +20,7 @@ const Alerts = () => {
   useEffect(() => {
     const fetchAlerts = async () => {
       try {
-        const response = await fetch('http://localhost:8000/api/alerts', {
+        const response = await fetch('http://35.154.0.127:8000/api/alerts', {
           headers: {
             'Cache-Control': 'no-cache',
             'Pragma': 'no-cache'
@@ -57,7 +57,7 @@ const Alerts = () => {
   const handleAlertUpdate = async (alertId, field, value) => {
     setAlertsList(prev => prev.map(a => a.id === alertId ? { ...a, [field]: value } : a));
     try {
-      await fetch(`http://localhost:8000/api/alerts/${alertId}`, {
+      await fetch(`http://35.154.0.127:8000/api/alerts/${alertId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ [field]: value })
@@ -69,7 +69,7 @@ const Alerts = () => {
 
   const handleExport = async () => {
     try {
-      const response = await fetch('http://localhost:8000/api/alerts/export');
+      const response = await fetch('http://35.154.0.127:8000/api/alerts/export');
       const blob = await response.blob();
       const url = window.URL.createObjectURL(blob);
       const link = document.createElement("a");
@@ -85,12 +85,12 @@ const Alerts = () => {
 
   const handleAcknowledgeAll = async () => {
     try {
-      const res = await fetch('http://localhost:8000/api/alerts/acknowledge-all', {
+      const res = await fetch('http://35.154.0.127:8000/api/alerts/acknowledge-all', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' }
       });
       if (res.ok) {
-        const response = await fetch('http://localhost:8000/api/alerts', {
+        const response = await fetch('http://35.154.0.127:8000/api/alerts', {
           headers: { 'Cache-Control': 'no-cache' }
         });
         const data = await response.json();

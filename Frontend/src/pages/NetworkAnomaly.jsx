@@ -26,7 +26,7 @@ const NetworkAnomaly = () => {
       // Only fetch if the local session is currently empty (e.g., a fresh page refresh)
       if (anomalies.length === 0 && setAnomalies) {
         try {
-          const response = await fetch('http://localhost:8000/api/alerts');
+          const response = await fetch('http://35.154.0.127:8000/api/alerts');
           const data = await response.json();
           if (data.status === 'success' && data.alerts) {
             // Load the top 50 recent threats into the live radar
@@ -58,7 +58,7 @@ const NetworkAnomaly = () => {
     setLoading(true);
     setTestResult(null);
     try {
-      const response = await fetch('http://localhost:8000/api/predict-manual', {
+      const response = await fetch('http://35.154.0.127:8000/api/predict-manual', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ force_attack: isAttack, features: Array(78).fill(0.0) })
@@ -342,7 +342,7 @@ const NetworkAnomaly = () => {
               ) : (
                 anomalies.map((anomaly) => (
                   <tr key={anomaly.id} className="hover:bg-red-50 dark:hover:bg-red-500/5 text-[13px] transition-colors">
-                    <td className="px-6 py-4 apple-text-muted whitespace-nowrap">{anomaly.time}</td>
+                    <td className="px-6 py-4 apple-text-muted whitespace-nowrap">{(anomaly.timestamp ? new Date(anomaly.timestamp.endsWith("Z") ? anomaly.timestamp : anomaly.timestamp + "Z").toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true}) : anomaly.time)}</td>
                     <td className="px-6 py-4 font-mono text-gray-800 dark:text-[#D6D6D3]">{anomaly.source}</td>
                     <td className="px-6 py-4 font-medium apple-text-primary">{anomaly.type}</td>
                     <td className="px-6 py-4"><span className={`px-2.5 py-1 rounded-md text-[11px] font-semibold border ${getSeverityStyle(anomaly.severity)}`}>{anomaly.severity}</span></td>

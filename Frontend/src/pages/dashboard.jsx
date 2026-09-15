@@ -30,7 +30,7 @@ const Dashboard = () => {
   const { theme } = useOutletContext() || { theme: 'dark' };
   const isDark = theme === 'dark';
   
-  const { stats } = useContext(TrafficContext);
+  const { stats, chartData } = useContext(TrafficContext);
   const [trafficVolumeHistory, setTrafficVolumeHistory] = useState([20, 35, 28, 45, 60, 55, 70, 65, 80]);
 
   const trueAnomalyCount = stats?.totalDeviations || 0;
@@ -53,10 +53,10 @@ const Dashboard = () => {
   }, [stats?.totalScanned]);
 
   const chartConfig = {
-    labels: trafficVolumeHistory.map((_, i) => `T-${trafficVolumeHistory.length - i}`),
+    labels: (chartData && chartData.length > 0 ? chartData : trafficVolumeHistory).map((_, i, arr) => `T-${arr.length - i}`),
     datasets: [{
       label: 'Live Network Throughput (Packets/sec)', 
-      data: trafficVolumeHistory, 
+      data: (chartData && chartData.length > 0) ? chartData : trafficVolumeHistory, 
       borderColor: chartLineColor, 
       backgroundColor: chartBgColor,
       borderWidth: 2, 

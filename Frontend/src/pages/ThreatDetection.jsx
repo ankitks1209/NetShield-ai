@@ -50,7 +50,7 @@ const ThreatDetection = () => {
       try {
         const token = localStorage.getItem('token');
         const headers = token ? { 'Authorization': `Bearer ${token}` } : {};
-        const res = await fetch('http://localhost:8000/api/users', { headers });
+        const res = await fetch('http://35.154.0.127:8000/api/users', { headers });
         
         if (res.ok) {
           const data = await res.json();
@@ -72,11 +72,11 @@ const ThreatDetection = () => {
   useEffect(() => {
     const fetchCoreSOCData = async () => {
       try {
-        const statsRes = await fetch('http://localhost:8000/api/network/stats');
+        const statsRes = await fetch('http://35.154.0.127:8000/api/network/stats');
         const statsData = await statsRes.json();
         if (statsData.status === 'success') setStats(statsData);
 
-        const alertsRes = await fetch('http://localhost:8000/api/alerts');
+        const alertsRes = await fetch('http://35.154.0.127:8000/api/alerts');
         const alertsData = await alertsRes.json();
         if (alertsData.status === 'success') {
           setLiveThreats(alertsData.alerts.slice(0, 10));
@@ -86,7 +86,7 @@ const ThreatDetection = () => {
           setUniqueActorCount(allUniqueIPs.size);
         }
 
-        const matrixRes = await fetch('http://localhost:8000/api/alerts/matrix');
+        const matrixRes = await fetch('http://35.154.0.127:8000/api/alerts/matrix');
         const matrixData = await matrixRes.json();
         if (matrixData.status === 'success') {
           setHeatmapAssets(matrixData.assets);
@@ -94,7 +94,7 @@ const ThreatDetection = () => {
           setHeatmapProbabilities(matrixData.matrix);
         }
 
-        const forecastRes = await fetch('http://localhost:8000/api/alerts/forecast');
+        const forecastRes = await fetch('http://35.154.0.127:8000/api/alerts/forecast');
         const forecastData = await forecastRes.json();
         if (forecastData.status === 'success') {
           setTrajectoryLabels(forecastData.labels);
@@ -111,7 +111,7 @@ const ThreatDetection = () => {
     const fetchTrends = async () => {
       setLoadingTrends(true);
       try {
-        const url = selectedType === 'All' ? 'http://localhost:8000/api/alerts/trends' : `http://localhost:8000/api/alerts/trends?attack_type=${encodeURIComponent(selectedType)}`;
+        const url = selectedType === 'All' ? 'http://35.154.0.127:8000/api/alerts/trends' : `http://35.154.0.127:8000/api/alerts/trends?attack_type=${encodeURIComponent(selectedType)}`;
         const response = await fetch(url);
         const data = await response.json();
 
@@ -133,7 +133,7 @@ const ThreatDetection = () => {
   const handleAlertUpdate = async (alertId, field, value) => {
     setLiveThreats(prev => prev.map(t => t.id === alertId ? { ...t, [field]: value } : t));
     try {
-      await fetch(`http://localhost:8000/api/alerts/${alertId}`, {
+      await fetch(`http://35.154.0.127:8000/api/alerts/${alertId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ [field]: value })
@@ -146,7 +146,7 @@ const ThreatDetection = () => {
   const handleExportReport = async () => {
     setIsExporting(true);
     try {
-      const response = await fetch('http://localhost:8000/api/alerts/export');
+      const response = await fetch('http://35.154.0.127:8000/api/alerts/export');
       if (!response.ok) throw new Error('Backend compilation failed');
       const blob = await response.blob();
       const url = window.URL.createObjectURL(blob);

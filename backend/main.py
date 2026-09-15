@@ -46,7 +46,7 @@ Base.metadata.create_all(bind=engine)
 system_settings_db = {
     "fastapiUrl": "http://localhost:8000",
     "retention": "30 Days",
-    "interface": "en0 (MacBook Air Network)",
+    "interface": "enp39s0 (MacBook Air Network)",
     "promiscuous": True,
     "jwtExpiry": 60,
     "mfaEnforced": True,
@@ -96,9 +96,13 @@ except Exception as e:
     features_unsw = None
 
 # --- CORS MIDDLEWARE ---
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],  # Vite frontend
+    allow_origins=[
+        "http://35.154.0.127:5173",
+        "http://localhost:5173"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -117,7 +121,6 @@ def health_check():
             "xgboost_unsw": xgb_model is not None
         }
     }
-
 # =========================================================
 # --- AUTHENTICATION & RBAC SECURITY SETUP ---
 # =========================================================
@@ -679,7 +682,7 @@ def get_system_devices():
         { "id": "dev_01", "name": "NetShield API Gateway", "ip": "127.0.0.1:8000", "mac": "-", "type": "FastAPI Server", "status": "Online", "load": "12%" },
         { "id": "dev_02", "name": "Auth & Audit Logs", "ip": "127.0.0.1:5432", "mac": "-", "type": "PostgreSQL", "status": "Online", "load": "5%" },
         { "id": "dev_03", "name": "Threat Intelligence", "ip": "127.0.0.1:27017", "mac": "-", "type": "MongoDB", "status": "Online", "load": "8%" },
-        { "id": "dev_04", "name": "Primary Capture Interface", "ip": "192.168.1.0/24", "mac": "en0", "type": "Network Interface", "status": "Online", "load": "44%" }
+        { "id": "dev_04", "name": "Primary Capture Interface", "ip": "192.168.1.0/24", "mac": "enp39s0", "type": "Network Interface", "status": "Online", "load": "44%" }
     ]}
 
 @app.get("/api/system/settings")

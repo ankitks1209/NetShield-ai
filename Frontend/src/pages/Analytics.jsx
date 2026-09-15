@@ -15,7 +15,7 @@ const Analytics = () => {
   // Wire export button to existing FastAPI CSV endpoint
   const handleExport = async () => {
     try {
-      const response = await fetch('http://localhost:8000/api/alerts/export');
+      const response = await fetch('http://35.154.0.127:8000/api/alerts/export');
       const blob = await response.blob();
       const url = window.URL.createObjectURL(blob);
       const link = document.createElement("a");

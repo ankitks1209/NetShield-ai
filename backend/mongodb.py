@@ -5,7 +5,7 @@ from pymongo import MongoClient
 
 load_dotenv()
 
-MONGO_URL = os.getenv("MONGO_URL")
+MONGO_URL = os.getenv("MONGO_URL") or os.getenv("MONGO_URI") or "mongodb+srv://Ankit:Ankit1234@netsheildai.pvnpkaq.mongodb.net/?appName=NetSheildAI"
 
 client = MongoClient(MONGO_URL)
 mongo_db = client["netshield_ai"]  # database name — will be created on first write

@@ -14,7 +14,7 @@ const ModelPerformance = () => {
     const fetchMetrics = async () => {
       setLoading(true);
       try {
-        const response = await fetch(`http://localhost:8000/api/model-metrics/${selectedDataset}`);
+        const response = await fetch(`http://35.154.0.127:8000/api/model-metrics/${selectedDataset}`);
         const data = await response.json();
         setMetrics(data);
       } catch (err) {
