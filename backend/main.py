@@ -9,6 +9,8 @@ from typing import Optional, List
 from collections import Counter
 from pydantic import EmailStr
 from fastapi import Request
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 import io
 import csv
@@ -38,6 +40,14 @@ from auth_utils import hash_password, verify_password, create_access_token
 from mongodb import log_anomaly_to_db, get_recent_anomalies, incident_logs
 
 app = FastAPI(title="NetShield AI Backend", version="3.0.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    allow_headers=["*"],
+)
 
 # Automatically create PostgreSQL tables (users, audit_logs) if they don't exist
 Base.metadata.create_all(bind=engine)

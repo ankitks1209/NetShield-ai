@@ -2,28 +2,15 @@
 version: '3.8'
 
 services:
-  zeek:
-    image: zeek/zeek:latest
-    container_name: netshield_zeek
-    network_mode: "host"
-    working_dir: /var/log/zeek
-    volumes:
-      - zeek_logs:/var/log/zeek
-    command: ["zeek", "-C", "-i", "enp39s0", "local", "LogAscii::use_json=T"]
-    restart: always
-
   backend:
     build: ./backend
     network_mode: "host"
     environment:
-      - MONGO_URI=mongodb+srv://Ankit:Ankit1234@netsheildai.pvnpkaq.mongodb.net/?appName=NetSheildAI
-      - DATABASE_URL=postgresql://neondb_owner:npg_j2rAOMB3qnXF@ep-tiny-tree-azncs9cn-pooler.c-3.ap-southeast-1.aws.neon.tech/neondb?sslmode=require
-    volumes:
-      - zeek_logs:/var/log/zeek:ro
-      - ./ml:/ml:ro
-
+      - MONGO_URI=${MONGO_URI}
+      - DATABASE_URL=${DATABASE_URL}
     depends_on:
-      - zeek
+      - mongodb
+      - postgres
     restart: always
 
   frontend:
@@ -32,5 +19,18 @@ services:
       - "5173:80"
     restart: always
 
-volumes:
-  zeek_logs:
+  mongodb:
+    image: mongo:latest
+    ports:
+      - "27017:27017"
+    restart: always
+
+  postgres:
+    image: postgres:15
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=netshield_db
+    ports:
+      - "5432:5432"
+    restart: always
