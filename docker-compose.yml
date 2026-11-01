@@ -1,36 +1,57 @@
-
 version: '3.8'
 
 services:
-  backend:
-    build: ./backend
-    network_mode: "host"
-    environment:
-      - MONGO_URI=${MONGO_URI}
-      - DATABASE_URL=${DATABASE_URL}
-    depends_on:
-      - mongodb
-      - postgres
-    restart: always
-
-  frontend:
-    build: ./Frontend
-    ports:
-      - "5173:80"
-    restart: always
-
-  mongodb:
-    image: mongo:latest
-    ports:
-      - "27017:27017"
-    restart: always
-
   postgres:
     image: postgres:15
+    container_name: postgres
     environment:
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres
-      - POSTGRES_DB=netshield_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: netshield
     ports:
       - "5432:5432"
-    restart: always
+    networks:
+      - netshield-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d netshield"]
+      interval: 3s
+      timeout: 3s
+      retries: 5
+
+  mongodb:
+    image: mongo:7.0
+    container_name: netshield-ai-mongodb-1
+    command: mongod --setParameter ignoreUnknownParams=true
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+
+  backend:
+    build: ./backend
+    container_name: backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    networks:
+      - netshield-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mongodb:
+        condition: service_started
+
+  frontend:
+    build: ./frontend
+    container_name: frontend
+    ports:
+      - "3000:3000"
+    networks:
+      - netshield-network
+    depends_on:
+      - backend
+
+networks:
+  netshield-network:
+    driver: bridge
