@@ -1,160 +1,113 @@
-import React, { createContext, useState, useEffect } from 'react';
-import toast from 'react-hot-toast'; 
-import { useNavigate } from 'react-router-dom';
-import { motion } from 'framer-motion';
+import { useEffect, useState } from 'react';
+import toast from 'react-hot-toast';
+import { useAuth } from './auth';
+import { TrafficContext } from './traffic';
+import { apiFetch, socketURL } from '../services/api';
 
-export const TrafficContext = createContext();
+const empty = key => ({ key, packets: [], columns: [], chartData: [], status: 'Connecting…', anomalies: [],
+  stats: { totalScanned: 0, totalDeviations: 0, riskScore: 0 }, error: null });
+const sourceLabels = { running: 'Replay active', telemetry_only: 'Live telemetry only — classification unavailable',
+  completed: 'Replay complete', disabled: 'Source disabled', starting: 'Starting source…',
+  unavailable: 'Source unavailable', degraded: 'Detection degraded', stopped: 'Source stopped',
+  stale: 'Zeek sensor data is stale', clock_skew: 'Zeek sensor clock is ahead' };
 
 export const TrafficProvider = ({ children }) => {
-  const navigate = useNavigate();
-
-  // Global State
+  const { token, verified } = useAuth();
   const [selectedDataset, setSelectedDataset] = useState('cicids2017');
-  const [packets, setPackets] = useState([]);
-  const [columns, setColumns] = useState([]);
-  const [chartData, setChartData] = useState([]);
-  const [status, setStatus] = useState('Connecting...');
-  const [anomalies, setAnomalies] = useState([]);
-  const anomalyCount = anomalies.length;
-
-  const [stats, setStats] = useState({
-    totalScanned: 0,
-    totalDeviations: 0,
-    riskScore: 12
-  });
-
-  const fetchBackendStats = async () => {
-    try {
-      const res = await fetch('http://35.154.0.127:8000/api/network/stats');
-      const data = await res.json();
-      if (data.status === 'success') {
-        setStats(prev => ({
-          ...prev,
-          totalScanned: Math.max(prev?.totalScanned || 0, data.totalScanned || 0),
-          totalDeviations: data.totalDeviations ?? prev?.totalDeviations ?? 0,
-          riskScore: data.riskScore ?? prev?.riskScore ?? 0
-        }));
-      }
-    } catch (err) {
-      console.error("Failed to fetch backend stats:", err);
-    }
-  };
+  const [state, setState] = useState(() => empty(''));
+  const key = token && verified ? `${token}:${selectedDataset}` : '';
+  const current = state.key === key && key ? state : empty(key);
 
   useEffect(() => {
-    const fetchGlobalBaseline = async () => {
+    if (!key) return;
+    let cancelled = false;
+    let socket;
+    let reconnectTimer;
+    let retryMs = 1000;
+    let polling = false;
+    let lastSample;
+    const controller = new AbortController();
+    const update = change => {
+      if (!cancelled) setState(previous => change(previous.key === key ? previous : empty(key)));
+    };
+    const sync = async () => {
+      if (polling) return;
+      polling = true;
       try {
-        const res = await fetch('http://35.154.0.127:8000/api/alerts');
-        const data = await res.json();
-        
-        if (data.status === 'success' && data.alerts) {
-          setAnomalies(data.alerts.slice(0, 50));
+        const [statsResponse, alertsResponse] = await Promise.all([
+          apiFetch('/api/network/stats', { signal: controller.signal }),
+          apiFetch('/api/alerts', { signal: controller.signal }),
+        ]);
+        const [stats, alerts] = await Promise.all([statsResponse.json(), alertsResponse.json()]);
+        const now = Date.now();
+        const count = stats.sources?.[selectedDataset]?.processed ?? 0;
+        const rate = lastSample ? Math.max(0, (count - lastSample.count) / ((now - lastSample.time) / 1000)) : 0;
+        lastSample = { count, time: now };
+        update(previous => ({ ...previous, stats, anomalies: alerts.alerts, error: null,
+          chartData: [...previous.chartData, Number(rate.toFixed(2))].slice(-30) }));
+      } catch (error) {
+        if (error.name !== 'AbortError') update(previous => ({ ...previous, error: error.message }));
+      } finally {
+        polling = false;
+      }
+    };
+    const connect = () => {
+      if (cancelled) return;
+      socket = new WebSocket(socketURL(selectedDataset));
+      socket.onopen = () => {
+        retryMs = 1000;
+        socket.send(JSON.stringify({ type: 'authenticate', token }));
+      };
+      socket.onmessage = event => {
+        let message;
+        try { message = JSON.parse(event.data); } catch { return; }
+        if (message.type === 'resync_required') { sync(); return; }
+        if (message.type === 'source_status') {
+          update(previous => ({ ...previous, status: message.status === 'waiting_for_log' ? 'Waiting for Zeek log' : sourceLabels[message.status] || 'Unknown source state',
+            error: message.error || (message.malformed_lines ? `${message.malformed_lines} malformed Zeek lines skipped; inspect sensor health` : null) }));
+          return;
         }
-      } catch (err) {
-        console.error("Failed to hydrate global baseline:", err);
-      }
+        if (message.type !== 'packet') return;
+        update(previous => ({
+          ...previous, packets: [message, ...previous.packets].slice(0, 50),
+          status: message.analysis_status === 'analyzed' ? 'Replay active' : 'Detection unavailable',
+          columns: Object.keys(message).slice(0, 4),
+          error: message.error || null,
+          anomalies: message.incident && !message.simulated
+            ? [message.incident, ...previous.anomalies.filter(item => item.id !== message.incident.id)].slice(0, 100)
+            : previous.anomalies,
+        }));
+        if (message.incident && !message.simulated) {
+          toast.error(`${message.incident.severity}: ${message.incident.type}`, { id: message.incident.id });
+        }
+      };
+      socket.onerror = () => update(previous => ({ ...previous, status: 'Connection error' }));
+      socket.onclose = event => {
+        if (cancelled) return;
+        update(previous => ({ ...previous, status: event.code === 1008 ? 'Stream access denied' : 'Disconnected — reconnecting…' }));
+        if (event.code !== 1008) {
+          reconnectTimer = setTimeout(connect, retryMs);
+          retryMs = Math.min(retryMs * 2, 15000);
+        }
+      };
     };
-
-    fetchGlobalBaseline();
-    fetchBackendStats();
-  }, []);
-
-  // WebSocket & Live Stream Engine
-  useEffect(() => {
-    setPackets([]);
-    setChartData([]);
-    setStatus('Connecting...');
-
-    const statsInterval = setInterval(fetchBackendStats, 5000);
-    const ws = new WebSocket(`ws://35.154.0.127:8000/ws/traffic/stream?dataset=${selectedDataset}`);
-
-    ws.onopen = () => setStatus('Live Stream Active');
-    ws.onclose = () => setStatus('Disconnected');
-    ws.onerror = () => setStatus('Connection Error');
-
-    ws.onmessage = (event) => {
-      const packet = JSON.parse(event.data);
-
-      const excludedKeys = ['active_dataset', 'ai_classification', 'is_anomaly'];
-      setColumns(Object.keys(packet).filter(k => !excludedKeys.includes(k)).slice(0, 4)); 
-      setPackets(prev => [packet, ...prev].slice(0, 10));
-      
-      const bandwidthMetric = packet[' Total Length of Fwd Packets'] || packet['Total Length of Fwd Packets'] || packet.orig_bytes || packet.sbytes || packet.duration || packet.dur || packet[' Flow Duration'] || packet.spkts || (Math.floor(Math.random() * 40) + 20);
-      setChartData(prev => [...prev, bandwidthMetric].slice(-15));
-
-      if (packet.is_anomaly) {
-        const threatName = packet.ai_classification || 'Unknown Threat';
-        const sourceIp = packet['Source IP'] || 'Mac Interface';
-
-        toast.custom((t) => (
-          <motion.div
-            initial={{ opacity: 0, y: -20, scale: 0.95 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, scale: 0.95, transition: { duration: 0.2 } }}
-            transition={{ type: 'spring', damping: 25, stiffness: 300 }}
-            className="cursor-pointer flex flex-col w-[320px] p-4 rounded-2xl shadow-[0_8px_30px_rgba(0,0,0,0.12)] backdrop-blur-2xl transition-transform active:scale-95"
-            // We use inline styles here to easily read the CSS variables dictated by your light/dark mode switch
-            style={{
-              background: 'var(--toast-bg, rgba(20, 20, 22, 0.75))',
-              border: '1px solid var(--toast-border, rgba(239, 68, 68, 0.3))', // Red border for alerts
-              color: 'var(--toast-text, #F2F2F0)',
-            }}
-            onClick={() => { 
-              navigate('/dashboard/threats'); 
-              toast.dismiss(t.id);           
-            }}
-          >
-            <div className="flex items-center gap-2 mb-1.5">
-              <span className="flex h-2.5 w-2.5 relative">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-red-500"></span>
-              </span>
-              <span className="font-bold text-[12px] tracking-tight uppercase text-red-500">
-                Critical Threat Detected
-              </span>
-            </div>
-            
-            <p className="text-[13px] font-medium leading-snug">
-              {threatName} originating from <span className="font-mono text-red-500">{sourceIp}</span>
-            </p>
-            
-            <span className="text-[11px] opacity-60 mt-2 font-medium">Click to investigate incident &rarr;</span>
-          </motion.div>
-        ), { id: `alert-${Date.now()}` }); // Unique ID ensures they stack properly
-
-        const newAnomaly = {
-          id: `anm_${Math.floor(Math.random() * 10000)}`,
-          time: new Date().toLocaleTimeString(),
-          source: sourceIp, 
-          type: threatName,
-          description: 'Deviates from standard baseline behavior',
-          severity: 'Critical',
-          confidence: '99.7%'
-        };
-        
-        setAnomalies(prev => [newAnomaly, ...prev].slice(0, 50));
-        fetchBackendStats();
-      }
-
-      setStats(prev => ({
-        ...prev,
-        totalScanned: prev.totalScanned + 1
-      }));
-    };
-
+    sync();
+    connect();
+    const interval = setInterval(sync, 5000);
     return () => {
-      ws.close();
-      clearInterval(statsInterval);
+      cancelled = true;
+      controller.abort();
+      clearInterval(interval);
+      clearTimeout(reconnectTimer);
+      socket?.close();
     };
-  }, [selectedDataset]);
+  }, [key, selectedDataset, token]);
 
-  return (
-    <TrafficContext.Provider value={{ 
-      selectedDataset, setSelectedDataset, packets, columns, chartData, 
-      status, anomalyCount, anomalies, setAnomalies, stats, setStats 
-    }}>
-      {children}
-    </TrafficContext.Provider>
-  );
+  const setAnomalies = value => setState(previous => ({ ...previous,
+    anomalies: typeof value === 'function' ? value(previous.anomalies) : value }));
+  return <TrafficContext.Provider value={{ ...current, selectedDataset, setSelectedDataset,
+    anomalyCount: current.anomalies.length, setAnomalies }}>
+    {children}
+  </TrafficContext.Provider>;
 };
-
 export default TrafficProvider;

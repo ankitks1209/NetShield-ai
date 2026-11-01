@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 
 // Full-page network field. Moves on scroll with momentum + mouse repulsion.
@@ -7,7 +7,7 @@ const NetworkField = ({ isDark }) => {
   const mouseRef = useRef({ x: -9999, y: -9999 });
   const lastScrollRef = useRef(typeof window !== 'undefined' ? window.scrollY : 0);
   const scrollVelocityRef = useRef(0);
-  
+
   // Use a ref for the theme so the animation loop can read it without restarting
   const themeRef = useRef(isDark);
   useEffect(() => {
@@ -72,7 +72,7 @@ const NetworkField = ({ isDark }) => {
         const dy = n.y - mouse.y;
         const distToMouse = Math.hypot(dx, dy);
         let glow = 1.2 + Math.sin(n.pulse) * 0.5;
-        if (distToMouse < 120) {
+        if (distToMouse > 0 && distToMouse < 120) {
           const force = (120 - distToMouse) / 120;
           n.x += (dx / distToMouse) * force * 1.5;
           n.y += (dy / distToMouse) * force * 1.5;
@@ -113,12 +113,14 @@ const NetworkField = ({ isDark }) => {
     init();
     draw();
 
-    window.addEventListener('resize', () => { resize(); init(); });
+    const handleResize = () => { resize(); init(); };
+    window.addEventListener('resize', handleResize);
     window.addEventListener('mousemove', handleMouseMove);
     window.addEventListener('scroll', handleScroll);
 
     return () => {
       cancelAnimationFrame(animationId);
+      window.removeEventListener('resize', handleResize);
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('scroll', handleScroll);
     };
@@ -179,19 +181,19 @@ const Landing = () => {
   const features = [
     {
       title: 'Traffic monitoring',
-      desc: 'Every packet crossing your network is logged and streamed to the dashboard in real time.',
+      desc: 'Configured Zeek connection logs and dataset flows are read into an authenticated monitoring dashboard.',
     },
     {
       title: 'Anomaly detection',
-      desc: 'Models trained on CICIDS2017 and UNSW-NB15 compare live traffic against known-normal patterns.',
+      desc: 'Supported flow records are classified, with unknown and unavailable outcomes shown explicitly.',
     },
     {
-      title: 'Intrusion prediction',
-      desc: 'Flags traffic that matches the early signature of an attack, before it fully develops.',
+      title: 'Threat investigation',
+      desc: 'Review recorded attack classifications and source history during investigation.',
     },
     {
       title: 'Threat intelligence',
-      desc: 'Alerts are ranked by severity and routed to the analyst on duty, with full context attached.',
+      desc: 'Persistent incidents can be prioritized, assigned, investigated, and exported.',
     },
   ];
 
@@ -231,15 +233,15 @@ const Landing = () => {
             <div className={`w-1.5 h-1.5 rounded-full ${dotColor} transition-colors duration-500`} />
             <span className="font-semibold tracking-tight text-[15px]">NetShield AI</span>
           </a>
-          
+
           <div className={`hidden md:flex items-center gap-8 text-[13px] ${textMuted}`}>
             <a href="#how" className={`hover:${textMain} transition-colors`}>How it works</a>
             <a href="#features" className={`hover:${textMain} transition-colors`}>Capabilities</a>
           </div>
-          
+
           <div className="flex items-center gap-5">
             {/* Theme Toggle */}
-            <button 
+            <button
               onClick={() => setIsDark(!isDark)}
               className={`p-2 rounded-full ${textMuted} hover:${textMain} active:scale-90 transition-all`}
               aria-label="Toggle Theme"
@@ -277,7 +279,7 @@ const Landing = () => {
             <p className={`text-[17px] ${textMuted} leading-relaxed mb-10 max-w-lg transition-colors duration-500`}>
               NetShield AI ingests live network traffic, scores it against machine
               learning models trained on real intrusion data, and surfaces the
-              alerts that actually matter — before an anomaly becomes an incident.
+              recorded incidents for investigation in one central workspace.
             </p>
             <div className="flex items-center gap-4">
               <Link

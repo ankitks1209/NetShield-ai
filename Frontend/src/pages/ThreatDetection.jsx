@@ -1,9 +1,10 @@
-import React, { useState, useEffect } from 'react';
+import { apiFetch } from '../services/api';
+import { useState, useEffect, Fragment } from 'react';
 import { Chart as ChartJS, CategoryScale, LinearScale, BarElement, PointElement, LineElement, Title, Tooltip, Legend, Filler } from 'chart.js';
 import { Bar, Line } from 'react-chartjs-2';
-import { useOutletContext } from 'react-router-dom'; 
+import { useOutletContext } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import FluidSheet from '../components/FluidSheet'; 
+import FluidSheet from '../components/FluidSheet';
 
 ChartJS.register(CategoryScale, LinearScale, BarElement, PointElement, LineElement, Title, Tooltip, Legend, Filler);
 
@@ -17,11 +18,12 @@ const fadeInUp = {
 const ThreatDetection = () => {
   const { theme } = useOutletContext() || { theme: 'dark' };
   const isDark = theme === 'dark';
-  
+
   const [liveThreats, setLiveThreats] = useState([]);
+  const [errorMessage, setErrorMessage] = useState('');
   const [stats, setStats] = useState({ riskScore: 0, totalDeviations: 0 });
   const [uniqueActorCount, setUniqueActorCount] = useState(0);
-  
+
   const [chartData, setChartData] = useState(null);
   const [availableTypes, setAvailableTypes] = useState([]);
   const [selectedType, setSelectedType] = useState('All');
@@ -50,12 +52,12 @@ const ThreatDetection = () => {
       try {
         const token = localStorage.getItem('token');
         const headers = token ? { 'Authorization': `Bearer ${token}` } : {};
-        const res = await fetch('http://35.154.0.127:8000/api/users', { headers });
-        
+        const res = await apiFetch('/api/users', { headers });
+
         if (res.ok) {
           const data = await res.json();
           if (data.status === 'success' && data.users) {
-            const activeAnalysts = data.users.map(u => `${u.full_name || u.username} (${u.role})`);
+            const activeAnalysts = data.users.filter(u => u.is_active).map(u => String(u.id));
             setTeamMembers(['Unassigned', ...activeAnalysts]);
             return;
           }
@@ -63,7 +65,7 @@ const ThreatDetection = () => {
         throw new Error("Users endpoint not ready");
       } catch (error) {
         console.warn("Using mock team data:", error.message);
-        setTeamMembers(['Unassigned', 'Admin (Lead)', 'Sarah (L2)', 'David (L1)']);
+        setTeamMembers(['Unassigned']);
       }
     };
     fetchTeamMembers();
@@ -72,11 +74,11 @@ const ThreatDetection = () => {
   useEffect(() => {
     const fetchCoreSOCData = async () => {
       try {
-        const statsRes = await fetch('http://35.154.0.127:8000/api/network/stats');
+        const statsRes = await apiFetch('/api/network/stats');
         const statsData = await statsRes.json();
         if (statsData.status === 'success') setStats(statsData);
 
-        const alertsRes = await fetch('http://35.154.0.127:8000/api/alerts');
+        const alertsRes = await apiFetch('/api/alerts');
         const alertsData = await alertsRes.json();
         if (alertsData.status === 'success') {
           setLiveThreats(alertsData.alerts.slice(0, 10));
@@ -86,15 +88,15 @@ const ThreatDetection = () => {
           setUniqueActorCount(allUniqueIPs.size);
         }
 
-        const matrixRes = await fetch('http://35.154.0.127:8000/api/alerts/matrix');
+        const matrixRes = await apiFetch('/api/alerts/matrix');
         const matrixData = await matrixRes.json();
         if (matrixData.status === 'success') {
-          setHeatmapAssets(matrixData.assets);
-          setHeatmapVectors(matrixData.vectors);
-          setHeatmapProbabilities(matrixData.matrix);
+          setHeatmapAssets([...matrixData.assets, '-', '-', '-'].slice(0, 3));
+          setHeatmapVectors([...matrixData.vectors, '-', '-', '-'].slice(0, 3));
+          setHeatmapProbabilities(Array.from({length: 3}, (_, i) => Array.from({length: 3}, (_, j) => matrixData.matrix[i]?.[j] ?? 0)));
         }
 
-        const forecastRes = await fetch('http://35.154.0.127:8000/api/alerts/forecast');
+        const forecastRes = await apiFetch('/api/alerts/forecast');
         const forecastData = await forecastRes.json();
         if (forecastData.status === 'success') {
           setTrajectoryLabels(forecastData.labels);
@@ -105,14 +107,16 @@ const ThreatDetection = () => {
       }
     };
     fetchCoreSOCData();
+    const interval = setInterval(fetchCoreSOCData, 5000);
+    return () => clearInterval(interval);
   }, []);
 
   useEffect(() => {
     const fetchTrends = async () => {
       setLoadingTrends(true);
       try {
-        const url = selectedType === 'All' ? 'http://35.154.0.127:8000/api/alerts/trends' : `http://35.154.0.127:8000/api/alerts/trends?attack_type=${encodeURIComponent(selectedType)}`;
-        const response = await fetch(url);
+        const url = selectedType === 'All' ? '/api/alerts/trends' : `/api/alerts/trends?attack_type=${encodeURIComponent(selectedType)}`;
+        const response = await apiFetch(url);
         const data = await response.json();
 
         if (data.status === 'success') {
@@ -125,28 +129,29 @@ const ThreatDetection = () => {
             ]
           });
         }
-      } catch (error) {} finally { setLoadingTrends(false); }
+      } catch (error) { setErrorMessage(error.message); } finally { setLoadingTrends(false); }
     };
     fetchTrends();
   }, [selectedType]);
 
   const handleAlertUpdate = async (alertId, field, value) => {
-    setLiveThreats(prev => prev.map(t => t.id === alertId ? { ...t, [field]: value } : t));
     try {
-      await fetch(`http://35.154.0.127:8000/api/alerts/${alertId}`, {
+      const response = await apiFetch(`/api/alerts/${alertId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ [field]: value })
       });
+      const data = await response.json();
+      setLiveThreats(prev => prev.map(item => item.id === alertId ? data.incident : item));
     } catch (error) {
-      console.error(`Failed to update ${field}:`, error);
+      setErrorMessage(error.message);
     }
   };
 
   const handleExportReport = async () => {
     setIsExporting(true);
     try {
-      const response = await fetch('http://35.154.0.127:8000/api/alerts/export');
+      const response = await apiFetch('/api/alerts/export');
       if (!response.ok) throw new Error('Backend compilation failed');
       const blob = await response.blob();
       const url = window.URL.createObjectURL(blob);
@@ -165,27 +170,30 @@ const ThreatDetection = () => {
     }
   };
 
-  const handleIPClick = (ip) => {
+  const handleIPClick = async (ip) => {
     if (!ip || ip === 'Unknown' || ip === '-') return;
-    setSelectedIP(ip);
-    setIpHistory(liveThreats.filter(t => t.source === ip));
+    setSelectedIP(ip); setIpHistory([]);
+    try {
+      const data = await (await apiFetch(`/api/alerts/context/${encodeURIComponent(ip)}`)).json();
+      setIpHistory(data.incidents);
+    } catch (error) { setErrorMessage(error.message); }
   };
 
   const barChartOptions = {
     responsive: true, maintainAspectRatio: false,
     plugins: { legend: { position: 'top', labels: { color: textColor, font: { family: 'system-ui, sans-serif' } } }, tooltip: { mode: 'index', intersect: false } },
-    scales: { 
-      x: { grid: { display: false }, ticks: { color: textColor, font: { family: 'JetBrains Mono, monospace', size: 10 } } }, 
-      y: { border: { display: false }, grid: { color: gridColor, drawBorder: false }, ticks: { color: textColor, font: { family: 'JetBrains Mono, monospace', size: 10 } } } 
+    scales: {
+      x: { grid: { display: false }, ticks: { color: textColor, font: { family: 'JetBrains Mono, monospace', size: 10 } } },
+      y: { border: { display: false }, grid: { color: gridColor, drawBorder: false }, ticks: { color: textColor, font: { family: 'JetBrains Mono, monospace', size: 10 } } }
     },
     animation: { duration: 800, easing: 'easeOutQuart' } // Apple-style sweeping draw
   };
 
   const trajectoryData = {
-    labels: trajectoryLabels.length > 0 ? trajectoryLabels : ['Pending'],
+    labels: trajectoryLabels,
     datasets: [{
       label: 'Volume Trajectory & Forecast',
-      data: trajectoryPoints.length > 0 ? trajectoryPoints : [0],
+      data: trajectoryPoints,
       borderColor: isDark ? '#ef4444' : '#dc2626',
       backgroundColor: isDark ? 'rgba(239, 68, 68, 0.15)' : 'rgba(220, 38, 38, 0.1)',
       fill: true, tension: 0.4, borderWidth: 2, pointRadius: 3
@@ -205,21 +213,21 @@ const ThreatDetection = () => {
     return 2.5;
   };
 
-  const cardMaterial = isDark 
-    ? 'bg-[#121214]/65 border border-white/[0.08] shadow-[0_4px_24px_rgba(0,0,0,0.35)] backdrop-blur-xl rounded-2xl' 
+  const cardMaterial = isDark
+    ? 'bg-[#121214]/65 border border-white/[0.08] shadow-[0_4px_24px_rgba(0,0,0,0.35)] backdrop-blur-xl rounded-2xl'
     : 'bg-white/70 border border-black/[0.06] shadow-[0_4px_20px_rgba(0,0,0,0.03)] backdrop-blur-xl rounded-2xl';
-  
+
   const textPrimary = isDark ? 'text-[#F2F2F0]' : 'text-[#1D1D1F]';
   const textMuted = isDark ? 'text-[#9A9A97]' : 'text-[#86868B]';
 
   return (
     <div className="space-y-6 transition-colors duration-500 relative">
-      
+
       {/* HEADER BAR */}
       <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
         <div>
           <h2 className={`text-[20px] font-semibold tracking-tight ${textPrimary}`}>Intrusion Prediction Engine</h2>
-          <p className={`text-[13px] ${textMuted} mt-0.5`}>AI-driven threat forecasting and attack probability analysis</p>
+          <p className={`text-[13px] ${textMuted} mt-0.5`}>Recorded threat patterns, incident priorities, and source investigation</p>
         </div>
         <div className={`flex items-center gap-4 ${isDark ? 'bg-red-500/10 border-red-500/20' : 'bg-red-50 border-red-200'} border px-5 py-3 rounded-xl transition-colors`}>
           <div className="flex flex-col">
@@ -238,7 +246,7 @@ const ThreatDetection = () => {
           { label: 'Total Logged Threats', value: stats.totalDeviations.toString(), subtext: 'Persisted in Database' },
           { label: 'Active Threat Actors', value: uniqueActorCount.toString(), subtext: 'Unique IPs identified' },
           { label: 'Most Vulnerable Asset', value: heatmapAssets[0] !== '-' ? heatmapAssets[0] : 'None', subtext: 'Highest attack volume' },
-          { label: 'Auto-Mitigation', value: '98%', subtext: 'Systems armed' },
+          { label: 'Auto-Mitigation', value: 'Unavailable', subtext: 'Automatic response not supported' },
         ].map((metric, i) => (
           <motion.div {...fadeInUp} key={i} className={`${cardMaterial} p-5 flex flex-col justify-between hover:scale-[1.01] transition-transform`}>
             <h3 className={`text-[13px] ${textMuted} font-medium tracking-wide uppercase mb-3`}>{metric.label}</h3>
@@ -254,35 +262,35 @@ const ThreatDetection = () => {
         {/* PROBABILITY MATRIX */}
         <motion.div {...fadeInUp} className={`${cardMaterial} p-6 min-h-[300px] flex flex-col`}>
           <div className="flex justify-between items-center mb-6">
-            <h3 className={`text-[15px] font-semibold tracking-tight ${textPrimary}`}>Attack Probability Matrix</h3>
+            <h3 className={`text-[15px] font-semibold tracking-tight ${textPrimary}`}>Observed Attack Distribution</h3>
             <span className={`text-[11px] ${textMuted} px-2.5 py-1 font-medium rounded-md ${isDark ? 'bg-white/[0.03] border border-white/[0.05]' : 'bg-black/[0.02] border border-black/[0.04]'}`}>
               Synced w/ MongoDB
             </span>
           </div>
-          
+
           <div className="flex-grow flex flex-col justify-center">
             <div className="grid grid-cols-4 gap-2 text-center">
               <div></div>
               {heatmapVectors.map((vec, i) => <div key={i} className={`text-[11px] font-semibold ${textMuted} self-end pb-2 truncate px-1`} title={vec}>{vec}</div>)}
-              
+
               {heatmapAssets.map((asset, rowIndex) => (
-                <React.Fragment key={rowIndex}>
+                <Fragment key={rowIndex}>
                   <div className={`text-[11px] font-semibold ${textMuted} self-center pr-2 text-right truncate`} title={asset}>{asset}</div>
                   {heatmapProbabilities[rowIndex] && heatmapProbabilities[rowIndex].map((prob, colIndex) => {
                     const isValid = heatmapVectors[colIndex] !== '-' && asset !== '-';
-                    const cellBg = isValid 
-                      ? `rgba(${isDark ? '239, 68, 68' : '220, 38, 38'}, ${Math.max(0.12, prob)})` 
+                    const cellBg = isValid
+                      ? `rgba(${isDark ? '239, 68, 68' : '220, 38, 38'}, ${Math.max(0.12, prob)})`
                       : (isDark ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)');
-                    const cellBorder = isValid 
-                      ? `rgba(${isDark ? '239, 68, 68' : '220, 38, 38'}, 0.3)` 
+                    const cellBorder = isValid
+                      ? `rgba(${isDark ? '239, 68, 68' : '220, 38, 38'}, 0.3)`
                       : (isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)');
-                    const cellText = isValid 
-                      ? (isDark ? '#fca5a5' : '#991b1b') 
+                    const cellText = isValid
+                      ? (isDark ? '#fca5a5' : '#991b1b')
                       : (isDark ? '#4b5563' : '#d1d5db');
 
                     return (
-                      <div 
-                        key={colIndex} 
+                      <div
+                        key={colIndex}
                         className="rounded-lg h-10 md:h-12 flex items-center justify-center text-[12px] font-bold transition-transform hover:scale-105 shadow-sm"
                         style={{ backgroundColor: cellBg, border: `1px solid ${cellBorder}`, color: cellText }}
                       >
@@ -290,7 +298,7 @@ const ThreatDetection = () => {
                       </div>
                     )
                   })}
-                </React.Fragment>
+                </Fragment>
               ))}
             </div>
           </div>
@@ -299,9 +307,9 @@ const ThreatDetection = () => {
         {/* LIVE TRAJECTORY */}
         <motion.div {...fadeInUp} className={`${cardMaterial} p-6 min-h-[300px] flex flex-col`}>
           <div className="flex justify-between items-center mb-4">
-            <h3 className={`text-[15px] font-semibold tracking-tight ${textPrimary}`}>Live Attack Trajectory</h3>
+            <h3 className={`text-[15px] font-semibold tracking-tight ${textPrimary}`}>Intrusion Forecast (Unavailable)</h3>
             <div className={`text-[11px] font-bold px-3 py-1 rounded shadow-sm transition-colors ${isDark ? 'bg-white/10 text-[#F2F2F0]' : 'bg-white text-[#1D1D1F] border border-black/5'}`}>
-              Forecasting
+              Not validated
             </div>
           </div>
           <div className="flex-grow w-full relative">
@@ -317,8 +325,8 @@ const ThreatDetection = () => {
             <h3 className={`text-[16px] font-semibold tracking-tight ${textPrimary}`}>Weekly Threat Trends</h3>
             <p className={`text-[12px] ${textMuted} mt-0.5`}>Time-series aggregation of detected anomalies</p>
           </div>
-          
-          <select 
+
+          <select
             value={selectedType}
             onChange={(e) => setSelectedType(e.target.value)}
             className={`text-[12px] font-medium px-3 py-1.5 rounded-lg outline-none cursor-pointer transition-colors ${isDark ? 'bg-white/5 text-[#F2F2F0] hover:bg-white/10' : 'bg-black/5 text-[#1D1D1F] hover:bg-black/10'}`}
@@ -333,16 +341,16 @@ const ThreatDetection = () => {
         <div className="h-[300px] w-full relative">
           <AnimatePresence mode="wait">
             {loadingTrends ? (
-              <motion.div 
-                key="loading" 
+              <motion.div
+                key="loading"
                 initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
                 className={`absolute inset-0 flex items-center justify-center text-[13px] ${textMuted}`}
               >
                 Aggregating timeline data...
               </motion.div>
             ) : chartData ? (
-              <motion.div 
-                key="chart" 
+              <motion.div
+                key="chart"
                 initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} transition={{ duration: 0.5, ease: 'easeOut' }}
                 className="w-full h-full"
               >
@@ -357,6 +365,7 @@ const ThreatDetection = () => {
         </div>
       </motion.div>
 
+      {errorMessage && <p role="alert" className="text-red-500 text-sm">{errorMessage}</p>}
       {/* REAL TIME FEED */}
       <motion.div {...fadeInUp} className={`${cardMaterial} overflow-hidden w-full max-w-full`}>
         <div className={`px-6 py-4 border-b flex justify-between items-center ${isDark ? 'border-white/[0.07] bg-white/[0.01]' : 'border-black/[0.05] bg-black/[0.01]'}`}>
@@ -364,8 +373,8 @@ const ThreatDetection = () => {
             <h2 className={`text-[15px] font-semibold tracking-tight ${textPrimary}`}>Real-Time Incident Triage Feed</h2>
             <p className={`text-[11px] ${textMuted} mt-0.5`}>Click any Source IP to view context enrichment timeline.</p>
           </div>
-          
-          <button 
+
+          <button
             onClick={handleExportReport}
             disabled={isExporting}
             className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[#0071E3] hover:bg-[#0077ED] text-white text-[12px] font-medium transition-all shadow-sm disabled:opacity-50 active:scale-95 cursor-pointer"
@@ -380,7 +389,7 @@ const ThreatDetection = () => {
             {isExporting ? 'Generating...' : 'Export CSV'}
           </button>
         </div>
-        
+
         <div className="overflow-x-auto">
           <table className="w-full text-left border-collapse">
             <thead>
@@ -396,7 +405,7 @@ const ThreatDetection = () => {
               {liveThreats.map((threat) => (
                 <tr key={threat.id || threat._id} className={`hover:bg-black/[0.02] dark:hover:bg-white/[0.02] transition-colors text-[13px] ${textPrimary}`}>
                   <td className="px-6 py-4 font-medium">{threat.type}</td>
-                  <td 
+                  <td
                     className="px-6 py-4 font-mono text-[12px] cursor-pointer text-[#0071E3] dark:text-[#0A84FF] hover:underline"
                     onClick={() => handleIPClick(threat.source)}
                     title="Click to view IP historical context"
@@ -404,7 +413,7 @@ const ThreatDetection = () => {
                     {threat.source || 'Unknown'}
                   </td>
                   <td className="px-6 py-4"><span className={`font-bold ${getRiskColor(calculateNumericRisk(threat.severity))}`}>{calculateNumericRisk(threat.severity).toFixed(1)}</span></td>
-                  
+
                   <td className="px-6 py-4">
                     <select
                       value={threat.assignee || 'Unassigned'}
@@ -420,8 +429,8 @@ const ThreatDetection = () => {
                       value={threat.status || 'Open'}
                       onChange={(e) => handleAlertUpdate(threat.id || threat._id, 'status', e.target.value)}
                       className={`bg-transparent border-none text-[11px] font-bold uppercase tracking-wider px-2 py-1 outline-none cursor-pointer ${
-                        threat.status === 'Closed' ? 'text-emerald-500' 
-                        : threat.status === 'Investigating' ? 'text-amber-500' 
+                        threat.status === 'Closed' ? 'text-emerald-500'
+                        : threat.status === 'Investigating' ? 'text-amber-500'
                         : threat.status === 'False Positive' ? 'text-[#86868B]'
                         : 'text-red-500'
                       }`}
@@ -437,9 +446,9 @@ const ThreatDetection = () => {
       </motion.div>
 
       {/* FLUID THREAT CONTEXT SHEET */}
-      <FluidSheet 
-        isOpen={!!selectedIP} 
-        onClose={() => setSelectedIP(null)} 
+      <FluidSheet
+        isOpen={!!selectedIP}
+        onClose={() => setSelectedIP(null)}
         title={`Threat Context: ${selectedIP}`}
         isDark={isDark}
       >
@@ -459,9 +468,9 @@ const ThreatDetection = () => {
 
           <div className="flex justify-between items-center mt-8 mb-4">
              <h4 className={`text-[15px] font-semibold tracking-tight ${textPrimary}`}>Historical Attack Timeline</h4>
-             <button 
+             <button
                 className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-red-500 text-white hover:bg-red-600 transition-colors text-[13px] font-bold active:scale-95 shadow-md"
-                onClick={() => alert(`Firewall rule initiated: Block ${selectedIP}`)}
+                disabled title="Firewall response is unavailable"
               >
                 <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
@@ -472,22 +481,22 @@ const ThreatDetection = () => {
 
           <div className="space-y-4 relative before:absolute before:inset-0 before:ml-5 before:-translate-x-px md:before:mx-auto md:before:translate-x-0 before:h-full before:w-0.5 before:bg-gradient-to-b before:from-transparent before:via-gray-300 dark:before:via-gray-700 before:to-transparent">
             {ipHistory.map((incident, idx) => {
-              const timeString = incident.timestamp 
-                ? new Date(incident.timestamp).toLocaleString() 
-                : new Date(Date.now() - idx * 60000).toLocaleString(); 
+              const timeString = incident.timestamp
+                ? new Date(incident.timestamp).toLocaleString()
+                : 'Timestamp unavailable';
 
               return (
-                <motion.div 
+                <motion.div
                   initial={{ opacity: 0, x: idx % 2 === 0 ? -20 : 20 }}
                   animate={{ opacity: 1, x: 0 }}
                   transition={{ delay: idx * 0.1, type: 'spring' }}
-                  key={idx} 
+                  key={idx}
                   className="relative flex items-center justify-between md:justify-normal md:odd:flex-row-reverse group is-active"
                 >
                   <div className={`flex items-center justify-center w-10 h-10 rounded-full border-[3px] shadow-sm z-10 shrink-0 md:order-1 md:group-odd:-translate-x-1/2 md:group-even:translate-x-1/2 ${isDark ? 'border-[#0A0A0B] bg-red-500/20 text-red-400' : 'border-white bg-red-100 text-red-500'}`}>
                     <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
                   </div>
-                  
+
                   <div className={`w-[calc(100%-4rem)] md:w-[calc(50%-2.5rem)] p-5 rounded-2xl shadow-sm border ${isDark ? 'bg-white/5 border-white/10' : 'bg-white/60 border-black/5'} backdrop-blur-md hover:scale-[1.02] transition-transform`}>
                     <div className="flex justify-between items-start mb-3">
                       <div>
@@ -495,7 +504,7 @@ const ThreatDetection = () => {
                         <span className={`text-[11px] font-mono ${textMuted}`}>{timeString}</span>
                       </div>
                       <span className={`text-[10px] uppercase font-bold tracking-wider px-2 py-1 rounded ${
-                          incident.status === 'Closed' ? 'bg-emerald-100 text-emerald-600 dark:bg-emerald-500/20 dark:text-emerald-400' 
+                          incident.status === 'Closed' ? 'bg-emerald-100 text-emerald-600 dark:bg-emerald-500/20 dark:text-emerald-400'
                           : 'bg-black/5 text-[#86868B] dark:bg-white/10 dark:text-[#9A9A97]'
                       }`}>
                         {incident.status || 'Open'}

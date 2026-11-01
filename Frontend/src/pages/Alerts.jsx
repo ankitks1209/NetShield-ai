@@ -1,4 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import FluidSheet from '../components/FluidSheet';
+import { apiFetch } from '../services/api';
+import { useState, useEffect } from 'react';
 import { useOutletContext } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 
@@ -11,16 +13,21 @@ const fadeInUp = {
 const Alerts = () => {
   const { theme } = useOutletContext() || { theme: 'dark' };
   const isDark = theme === 'dark';
-  
+
   const [activeTab, setActiveTab] = useState('Open');
   const [alertsList, setAlertsList] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [errorMessage, setErrorMessage] = useState('');
+  const [selected, setSelected] = useState(null);
+  const [note, setNote] = useState('');
+  const [includeSimulated, setIncludeSimulated] = useState(false);
+  const [team, setTeam] = useState([]);
 
   // Fetch live alerts from MongoDB via FastAPI
   useEffect(() => {
     const fetchAlerts = async () => {
       try {
-        const response = await fetch('http://35.154.0.127:8000/api/alerts', {
+        const response = await apiFetch(`/api/alerts?include_simulated=${includeSimulated}`, {
           headers: {
             'Cache-Control': 'no-cache',
             'Pragma': 'no-cache'
@@ -30,11 +37,12 @@ const Alerts = () => {
           const data = await response.json();
           if (data.status === 'success') {
             const formattedAlerts = data.alerts.map(a => ({
+              ...a,
               id: a.id,
-              time: a.time || new Date(a.timestamp).toLocaleTimeString(),
+              time: new Date(a.timestamp).toLocaleString(),
               type: a.type,
               source: a.source,
-              target: 'Network Asset', 
+              target: 'Network Asset',
               severity: a.severity,
               status: a.status || 'Open',
               assignee: a.assignee || 'Unassigned'
@@ -43,33 +51,44 @@ const Alerts = () => {
           }
         }
       } catch (error) {
-        console.error("Failed to fetch alerts:", error);
+        setErrorMessage(error.message);
       } finally {
         setLoading(false);
       }
     };
 
     fetchAlerts();
-    const interval = setInterval(fetchAlerts, 5000); 
+    const interval = setInterval(fetchAlerts, 5000);
     return () => clearInterval(interval);
+  }, [includeSimulated]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    apiFetch('/api/users', { signal: controller.signal }).then(response => response.json())
+      .then(data => setTeam(data.users.filter(user => user.is_active)))
+      .catch(error => { if (error.name !== 'AbortError') setErrorMessage(error.message); });
+    return () => controller.abort();
   }, []);
 
   const handleAlertUpdate = async (alertId, field, value) => {
-    setAlertsList(prev => prev.map(a => a.id === alertId ? { ...a, [field]: value } : a));
     try {
-      await fetch(`http://35.154.0.127:8000/api/alerts/${alertId}`, {
+      const response = await apiFetch(`/api/alerts/${alertId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ [field]: value })
       });
+      const data = await response.json();
+      setAlertsList(previous => previous.map(item => item.id === alertId ? data.incident : item));
+      setSelected(previous => previous?.id === alertId ? data.incident : previous);
+      if (field === 'note') setNote('');
     } catch (error) {
-      console.error(`Failed to update ${field}:`, error);
+      setErrorMessage(error.message);
     }
   };
 
   const handleExport = async () => {
     try {
-      const response = await fetch('http://35.154.0.127:8000/api/alerts/export');
+      const response = await apiFetch(`/api/alerts/export?include_simulated=${includeSimulated}`);
       const blob = await response.blob();
       const url = window.URL.createObjectURL(blob);
       const link = document.createElement("a");
@@ -78,26 +97,27 @@ const Alerts = () => {
       document.body.appendChild(link);
       link.click();
       link.parentNode.removeChild(link);
+      URL.revokeObjectURL(url);
     } catch (error) {
-      console.error("Export failed", error);
+      setErrorMessage(error.message);
     }
   };
 
   const handleAcknowledgeAll = async () => {
     try {
-      const res = await fetch('http://35.154.0.127:8000/api/alerts/acknowledge-all', {
+      const res = await apiFetch('/api/alerts/acknowledge-all', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' }
       });
       if (res.ok) {
-        const response = await fetch('http://35.154.0.127:8000/api/alerts', {
+        const response = await apiFetch(`/api/alerts?include_simulated=${includeSimulated}`, {
           headers: { 'Cache-Control': 'no-cache' }
         });
         const data = await response.json();
         if (data.status === 'success') {
           setAlertsList(data.alerts.map(a => ({
             id: a.id,
-            time: a.time || new Date(a.timestamp).toLocaleTimeString(),
+            time: new Date(a.timestamp).toLocaleString(),
             type: a.type,
             source: a.source,
             target: 'Network Asset',
@@ -113,8 +133,8 @@ const Alerts = () => {
   };
 
   // Surface Tokens
-  const cardMaterial = isDark 
-    ? 'bg-[#121214]/65 border border-white/[0.08] shadow-[0_4px_24px_rgba(0,0,0,0.35)] backdrop-blur-xl rounded-2xl' 
+  const cardMaterial = isDark
+    ? 'bg-[#121214]/65 border border-white/[0.08] shadow-[0_4px_24px_rgba(0,0,0,0.35)] backdrop-blur-xl rounded-2xl'
     : 'bg-white/70 border border-black/[0.06] shadow-[0_4px_20px_rgba(0,0,0,0.03)] backdrop-blur-xl rounded-2xl';
   const textPrimary = isDark ? 'text-[#F2F2F0]' : 'text-[#1D1D1F]';
   const textMuted = isDark ? 'text-[#9A9A97]' : 'text-[#86868B]';
@@ -142,7 +162,13 @@ const Alerts = () => {
 
   return (
     <div className="space-y-6 transition-colors duration-500">
-      
+      {errorMessage && <p role="alert" className="text-red-500 text-[13px]">{errorMessage}</p>}
+      <label className={`flex items-center gap-2 text-[12px] ${textMuted}`}>
+        <input type="checkbox" checked={includeSimulated} onChange={event => setIncludeSimulated(event.target.checked)} />
+        Include simulations
+      </label>
+
+
       <div className="flex flex-col md:flex-row justify-between items-start md:items-end gap-4">
         <div>
           <h2 className={`text-[24px] font-semibold tracking-tight ${textPrimary}`}>Incident Alert Queue</h2>
@@ -152,7 +178,7 @@ const Alerts = () => {
           <button onClick={handleExport} className={`px-4 py-2 text-[13px] font-medium rounded-lg transition-colors active:scale-95 ${isDark ? 'bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.07] text-[#D6D6D3]' : 'bg-black/[0.03] hover:bg-black/[0.06] border border-black/[0.05] text-[#1D1D1F]'}`}>
             Export Logs
           </button>
-          <button 
+          <button
             onClick={handleAcknowledgeAll}
             className={`px-4 py-2 text-[13px] font-medium rounded-lg transition-colors active:scale-95 flex items-center gap-2 shadow-sm cursor-pointer ${isDark ? 'bg-white text-black hover:bg-gray-200' : 'bg-black text-white hover:bg-gray-800'}`}
           >
@@ -168,8 +194,8 @@ const Alerts = () => {
         {[
           { label: 'Unassigned Critical', value: alertsList.filter(a => a.severity === 'Critical' && a.assignee === 'Unassigned').length, subtext: 'Immediate action required', alert: true },
           { label: 'Active Incidents', value: alertsList.filter(a => a.status === 'Investigating').length, subtext: 'Currently under investigation', alert: false },
-          { label: 'Total Logs (24h)', value: alertsList.length, subtext: 'Recorded in database', alert: false },
-          { label: 'Auto-Remediated', value: '98%', subtext: 'Threats blocked by AI policies', alert: false },
+          { label: 'Loaded Incidents', value: alertsList.length, subtext: 'Recorded in database', alert: false },
+          { label: 'Auto-Remediation', value: 'Unavailable', subtext: 'Automatic response not supported', alert: false },
         ].map((metric, i) => (
           <motion.div {...fadeInUp} transition={{ delay: i * 0.1 }} key={i} className={`${cardMaterial} p-5 flex flex-col justify-between hover:scale-[1.01] transition-transform`}>
             <h3 className={`text-[12px] font-medium uppercase tracking-wide ${textMuted} mb-3`}>{metric.label}</h3>
@@ -184,7 +210,7 @@ const Alerts = () => {
       </div>
 
       <motion.div {...fadeInUp} transition={{ delay: 0.3 }} className={`${cardMaterial} overflow-hidden flex flex-col`}>
-        
+
         <div className={`px-6 py-4 border-b flex justify-between items-center ${isDark ? 'border-white/[0.07] bg-white/[0.01]' : 'border-black/[0.05] bg-black/[0.01]'}`}>
           <div className="flex gap-6">
             {['Open', 'Investigating', 'False Positive', 'Closed', 'All Alerts'].map((tab) => (
@@ -239,38 +265,38 @@ const Alerts = () => {
                   </tr>
                 ) : (
                   filteredAlerts.map((alert) => (
-                    <motion.tr 
+                    <motion.tr
                       initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-                      key={alert.id} 
+                      key={alert.id}
                       className={`transition-colors group text-[13px] ${alert.status === 'Open' ? (isDark ? 'bg-red-500/[0.03]' : 'bg-red-50') : (isDark ? 'hover:bg-white/[0.02]' : 'hover:bg-black/[0.02]')}`}
                     >
                       <td className="px-6 py-4">{getStatusIndicator(alert.status)}</td>
                       <td className={`px-6 py-4 font-mono text-[11px] ${textMuted}`}>{alert.id.substring(0, 8)}...</td>
-                      <td className={`px-6 py-4 ${textMuted}`}>{alert.time}</td>
+                      <td className={`px-6 py-4 ${textMuted}`}>{alert.timestamp ? new Date(alert.timestamp).toLocaleString() : alert.time}</td>
                       <td className="px-6 py-4">
                         <span className={`px-2.5 py-1 rounded-md text-[11px] font-bold border ${getSeverityBadge(alert.severity)}`}>
                           {alert.severity}
                         </span>
                       </td>
                       <td className="px-6 py-4">
-                        <div className={`font-semibold ${textPrimary}`}>{alert.type}</div>
+                        <div className={`font-semibold ${textPrimary}`}>{alert.type}{alert.simulated && <span className="ml-2 text-amber-500">Simulation</span>}</div>
                         <div className={`text-[11px] font-mono mt-0.5 ${textMuted}`}>SRC: {alert.source}</div>
                       </td>
-                      <td className={`px-6 py-4 font-mono text-[12px] ${textPrimary}`}>{alert.target}</td>
-                      
+                      <td className={`px-6 py-4 font-mono text-[12px] ${textPrimary}`}>{alert.destination || 'Not recorded'}</td>
+
                       <td className="px-6 py-4">
                         <span className={`flex items-center gap-2 ${alert.assignee === 'Unassigned' ? 'text-orange-500 italic' : textMuted}`}>
                           {alert.assignee !== 'Unassigned' && alert.assignee !== 'System (Auto)' && (
                             <div className={`w-5 h-5 rounded-full flex items-center justify-center text-[9px] font-bold ${isDark ? 'bg-white/10 text-white' : 'bg-black/10 text-black'}`}>
-                              {alert.assignee.split(' ')[0][0]}
+                              {(team.find(user => String(user.id) === alert.assignee)?.full_name || alert.assignee)[0]}
                             </div>
                           )}
                           <span className={`text-[12px] font-medium ${alert.assignee !== 'Unassigned' ? textPrimary : ''}`}>
-                            {alert.assignee}
+                            {team.find(user => String(user.id) === alert.assignee)?.full_name || alert.assignee}
                           </span>
                         </span>
                       </td>
-                      
+
                       <td className="px-6 py-4 text-right space-x-3">
                         {alert.status === 'Open' && (
                           <button onClick={() => handleAlertUpdate(alert.id, 'status', 'Investigating')} className="text-[12px] text-emerald-500 hover:text-emerald-400 font-bold transition-colors">Triage</button>
@@ -278,7 +304,7 @@ const Alerts = () => {
                         {alert.status === 'Investigating' && (
                           <button onClick={() => handleAlertUpdate(alert.id, 'status', 'Closed')} className="text-[12px] text-blue-500 hover:text-blue-400 font-bold transition-colors">Resolve</button>
                         )}
-                        <button className={`text-[12px] font-semibold transition-colors ${textMuted} hover:${textPrimary}`}>Details</button>
+                        <button onClick={() => { setSelected(alert); setNote(''); }} className={`text-[12px] font-semibold transition-colors ${textMuted} hover:${textPrimary}`}>Details</button>
                       </td>
                     </motion.tr>
                   ))
@@ -288,7 +314,28 @@ const Alerts = () => {
           </table>
         </div>
       </motion.div>
-      
+
+      <FluidSheet isOpen={Boolean(selected)} onClose={() => setSelected(null)} title={selected?.type || 'Incident investigation'}>
+        {selected && <div className={`space-y-4 max-w-3xl mx-auto ${textPrimary}`}>
+          <button className="text-blue-500 text-[13px]" onClick={() => setSelected(null)}>Close investigation</button>
+          <p className="text-[13px]">Source: {selected.source}</p>
+          <p className="text-[13px]">Confidence: {selected.confidence || 'Not applicable to simulation'}</p>
+          <p className="text-[13px]">Notification: {selected.notification_status || 'Not configured'}</p>
+          <label className="block text-[13px]">Assignee
+            <select aria-label="Incident assignee" value={selected.assignee} onChange={event => handleAlertUpdate(selected.id, 'assignee', event.target.value)} className="ml-3 px-3 py-2 rounded-lg bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10">
+              <option value="Unassigned">Unassigned</option>
+              {team.map(user => <option key={user.id} value={String(user.id)}>{user.full_name}</option>)}
+            </select>
+          </label>
+          <label className="block text-[13px]">Investigation note
+            <textarea maxLength={4000} value={note} onChange={event => setNote(event.target.value)} className="block w-full p-4 mt-2 rounded-xl bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10" />
+          </label>
+          <button disabled={!note.trim()} onClick={() => handleAlertUpdate(selected.id, 'note', note.trim())} className="px-4 py-2 bg-[#0071E3] text-white rounded-lg text-[13px] disabled:opacity-50">Save note</button>
+          {(selected.investigation_notes || []).map((entry, index) => <div key={index} className="p-4 rounded-xl bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 text-[13px]">
+            <p>{entry.note}</p><p className={`mt-2 text-[11px] ${textMuted}`}>Analyst {entry.actor_id} · {new Date(entry.timestamp).toLocaleString()}</p>
+          </div>)}
+        </div>}
+      </FluidSheet>
     </div>
   );
 };

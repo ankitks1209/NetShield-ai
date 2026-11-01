@@ -1,6 +1,7 @@
-import React, { useState, useContext, useEffect } from 'react';
+import { apiFetch } from '../services/api';
+import { useState, useContext } from 'react';
 import { useNavigate, useOutletContext } from 'react-router-dom';
-import { TrafficContext } from '../context/TrafficContext';
+import { TrafficContext } from '../context/traffic';
 import toast from 'react-hot-toast';
 import { Chart as ChartJS, ArcElement, Tooltip, Legend, CategoryScale, LinearScale, PointElement, LineElement } from 'chart.js';
 import { Doughnut, Line } from 'react-chartjs-2';
@@ -11,8 +12,8 @@ ChartJS.register(ArcElement, Tooltip, Legend, CategoryScale, LinearScale, PointE
 const NetworkAnomaly = () => {
   const { theme } = useOutletContext() || { theme: 'dark' };
   const navigate = useNavigate();
-  const [filter, setFilter] = useState('All');
-  const { anomalies, setAnomalies, stats } = useContext(TrafficContext);
+  const filter = 'All';
+  const { anomalies, setAnomalies, stats, selectedDataset } = useContext(TrafficContext);
   const [testResult, setTestResult] = useState(null);
   const [loading, setLoading] = useState(false);
 
@@ -20,37 +21,16 @@ const NetworkAnomaly = () => {
   const textColor = theme === 'dark' ? '#9A9A97' : '#86868B';
   const gridColor = theme === 'dark' ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)';
 
-  // Royal Upgrade: Fetch recent DB anomalies on fresh page load to prevent wiping to 0
-  useEffect(() => {
-    const fetchHistoricalData = async () => {
-      // Only fetch if the local session is currently empty (e.g., a fresh page refresh)
-      if (anomalies.length === 0 && setAnomalies) {
-        try {
-          const response = await fetch('http://35.154.0.127:8000/api/alerts');
-          const data = await response.json();
-          if (data.status === 'success' && data.alerts) {
-            // Load the top 50 recent threats into the live radar
-            setAnomalies(data.alerts.slice(0, 50));
-          }
-        } catch (err) {
-          console.error("Error fetching historical anomalies:", err);
-        }
-      }
-    };
-    
-    fetchHistoricalData();
-  }, []); // Empty dependency array ensures this runs only once on mount
-
   const clearSession = () => {
-    if (setAnomalies) setAnomalies([]); 
-    setTestResult(null); 
-    toast.success("Local session wiped. Backend logs remain safely intact.", { 
+    if (setAnomalies) setAnomalies([]);
+    setTestResult(null);
+    toast.success("Local session wiped. Backend logs remain safely intact.", {
       position: 'bottom-right',
-      style: { 
-        background: theme === 'dark' ? '#1D1D1F' : '#ffffff', 
-        color: theme === 'dark' ? '#F2F2F0' : '#1D1D1F', 
-        border: theme === 'dark' ? '1px solid rgba(255,255,255,0.1)' : '1px solid rgba(0,0,0,0.1)' 
-      } 
+      style: {
+        background: theme === 'dark' ? '#1D1D1F' : '#ffffff',
+        color: theme === 'dark' ? '#F2F2F0' : '#1D1D1F',
+        border: theme === 'dark' ? '1px solid rgba(255,255,255,0.1)' : '1px solid rgba(0,0,0,0.1)'
+      }
     });
   };
 
@@ -58,38 +38,27 @@ const NetworkAnomaly = () => {
     setLoading(true);
     setTestResult(null);
     try {
-      const response = await fetch('http://35.154.0.127:8000/api/predict-manual', {
+      const response = await apiFetch('/api/predict-manual', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ force_attack: isAttack, features: Array(78).fill(0.0) })
+        body: JSON.stringify({ force_attack: isAttack, dataset: selectedDataset === 'unsw-nb15' ? 'unsw-nb15' : 'cicids2017', features: Array(selectedDataset === 'unsw-nb15' ? 194 : 78).fill(0.0) })
       });
-      
+
       const data = await response.json();
-      
+
       if (!response.ok || data.detail) {
         setTestResult({ error: data.detail || "Model service unavailable", is_anomaly: false });
         return;
       }
-      
+
       setTestResult(data);
 
       if (data.is_anomaly && setAnomalies) {
-        const confNum = parseFloat(data.confidence) || 98.0;
-        let dynamicSeverity = confNum >= 98.0 ? 'Critical' : confNum >= 95.0 ? 'High' : 'Medium';
-        const threatType = data.ai_classification || data.prediction || 'Malicious Signature';
+        const dynamicSeverity = data.incident.severity;
+        const threatType = data.incident.type;
+        const newManualThreat = data.incident;
+        setAnomalies(prev => [newManualThreat, ...prev.filter(item => item.id !== newManualThreat.id)].slice(0, 100));
 
-        const newManualThreat = {
-          id: `manual_${Date.now()}`,
-          time: new Date().toLocaleTimeString(),
-          source: 'Manual Tester Sandbox',
-          type: threatType,
-          description: 'Manually injected test signature',
-          severity: dynamicSeverity,
-          confidence: data.confidence || '98.5%'
-        };
-
-        setAnomalies(prev => [newManualThreat, ...prev].slice(0, 50));
-        
         // UPGRADED CUSTOM TOAST PAYLOAD
         toast.custom(
           (t) => (
@@ -101,9 +70,9 @@ const NetworkAnomaly = () => {
               className={`cursor-pointer flex flex-col w-[320px] p-4 rounded-2xl shadow-[0_8px_30px_rgba(0,0,0,0.12)] backdrop-blur-2xl transition-transform active:scale-95 ${
                 theme === 'dark' ? 'bg-[rgba(20,20,22,0.85)] border border-red-500/30 text-[#F2F2F0]' : 'bg-[rgba(255,255,255,0.85)] border border-red-500/30 text-[#1D1D1F]'
               }`}
-              onClick={() => { 
-                navigate('/dashboard/threats'); 
-                toast.dismiss(t.id);           
+              onClick={() => {
+                navigate('/dashboard/threats');
+                toast.dismiss(t.id);
               }}
             >
               <div className="flex items-center gap-2 mb-1.5">
@@ -115,11 +84,11 @@ const NetworkAnomaly = () => {
                   {dynamicSeverity} Threat Detected
                 </span>
               </div>
-              
+
               <p className="text-[13px] font-medium leading-snug">
-                {threatType} <span className="opacity-75">({data.confidence})</span>
+                {threatType} <span className="opacity-75">({data.confidence || 'simulation — no model probability'})</span>
               </p>
-              
+
               <span className="text-[11px] opacity-60 mt-2 font-medium">Click to investigate incident &rarr;</span>
             </motion.div>
           ),
@@ -128,7 +97,7 @@ const NetworkAnomaly = () => {
       }
     } catch (err) {
       console.error("Test failed", err);
-      setTestResult({ error: "Backend connection error", is_anomaly: false });
+      setTestResult({ error: err.message, is_anomaly: false });
     } finally {
       setLoading(false);
     }
@@ -151,6 +120,7 @@ const NetworkAnomaly = () => {
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   };
 
   const getSeverityStyle = (severity) => {
@@ -185,7 +155,7 @@ const NetworkAnomaly = () => {
   };
 
   const recentAnomalies = [...anomalies].reverse().slice(-15);
-  
+
   const timelineData = {
     labels: recentAnomalies.map(a => a.time),
     datasets: [{
@@ -204,7 +174,7 @@ const NetworkAnomaly = () => {
   const timelineOptions = {
     responsive: true,
     maintainAspectRatio: false,
-    plugins: { 
+    plugins: {
       legend: { display: false },
       tooltip: {
         callbacks: {
@@ -216,27 +186,27 @@ const NetworkAnomaly = () => {
         }
       }
     },
-    scales: { 
-      x: { 
-        grid: { display: false }, 
-        ticks: { color: textColor, maxTicksLimit: 6, font: { size: 10 } } 
-      }, 
-      y: { 
-        min: 0, 
-        max: 4, 
-        grid: { color: gridColor }, 
-        ticks: { 
-          color: textColor, 
+    scales: {
+      x: {
+        grid: { display: false },
+        ticks: { color: textColor, maxTicksLimit: 6, font: { size: 10 } }
+      },
+      y: {
+        min: 0,
+        max: 4,
+        grid: { color: gridColor },
+        ticks: {
+          color: textColor,
           stepSize: 1,
-          callback: (val) => val === 3 ? 'Critical' : val === 2 ? 'High' : val === 1 ? 'Medium' : '' 
-        } 
-      } 
+          callback: (val) => val === 3 ? 'Critical' : val === 2 ? 'High' : val === 1 ? 'Medium' : ''
+        }
+      }
     }
   };
 
   return (
     <div className="space-y-6 transition-colors duration-300">
-      
+
       {/* HEADER BAR */}
       <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
         <div>
@@ -244,8 +214,8 @@ const NetworkAnomaly = () => {
           <p className="text-[13px] apple-text-muted">Monitoring baseline deviations and pattern recognition</p>
         </div>
         <div className="flex items-center gap-4">
-          <button 
-            onClick={clearSession} 
+          <button
+            onClick={clearSession}
             className="px-4 py-2 bg-black/5 dark:bg-white/5 apple-text-muted border border-black/10 dark:border-white/[0.07] rounded-lg text-[12px] font-medium hover:bg-black/10 dark:hover:bg-white/10 hover:text-black dark:hover:text-white transition-colors cursor-pointer"
           >
             Clear Local Session
@@ -324,7 +294,7 @@ const NetworkAnomaly = () => {
             Export CSV
           </button>
         </div>
-        
+
         <div className="overflow-x-auto">
           <table className="w-full text-left border-collapse">
             <thead className="bg-black/[0.02] dark:bg-white/[0.02] border-b border-black/5 dark:border-white/[0.07] apple-text-muted text-[11px] uppercase tracking-wider">
@@ -354,7 +324,7 @@ const NetworkAnomaly = () => {
           </table>
         </div>
       </div>
-      
+
     </div>
   );
 };

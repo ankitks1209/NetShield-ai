@@ -1,4 +1,5 @@
-import React, { useState, useEffect } from 'react';
+import { apiFetch } from '../services/api';
+import { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 
 const fadeInUp = {
@@ -23,7 +24,7 @@ const TeamManagement = () => {
   // Invite Modal State
   const [isInviteOpen, setIsInviteOpen] = useState(false);
   const [inviteEmail, setInviteEmail] = useState('');
-  const [inviteRole, setInviteRole] = useState('Security Analyst');
+  const [inviteRole, setInviteRole] = useState('analyst');
   const [inviteLoading, setInviteLoading] = useState(false);
   const [inviteMessage, setInviteMessage] = useState(null);
 
@@ -33,67 +34,33 @@ const TeamManagement = () => {
   const [editLoading, setEditLoading] = useState(false);
   const [editMessage, setEditMessage] = useState(null);
 
-  // Bulletproof Auth Headers
-  const getAuthHeaders = () => {
-    const token = localStorage.getItem('token') || localStorage.getItem('access_token');
-    return token 
-      ? { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }
-      : { 'Content-Type': 'application/json' };
-  };
-
-  const fetchTeamData = async () => {
-    try {
-      const headers = getAuthHeaders();
-
-      // Fetch Users
-      const userRes = await fetch('http://35.154.0.127:8000/api/users', { headers });
-      if (userRes.ok) {
-        const userData = await userRes.json();
-        if (userData.status === 'success') {
-          const mappedUsers = userData.users.map(u => ({
-            id: u.id || u._id,
-            name: u.full_name || u.username,
-            email: u.email || `${u.username}@netshield.local`,
-            role: u.role || 'Analyst',
-            status: u.is_active !== false ? 'Active' : 'Suspended',
-            mfa: u.mfa_enabled !== false ? 'Disabled' : 'Enabled',
-            lastLogin: 'Session Active'
-          }));
-          setTeamMembers(mappedUsers);
-        }
-      }
-      
-      // Fetch Audit Logs
-      const auditRes = await fetch('http://35.154.0.127:8000/api/admin/audit-logs', { headers });
-      if (auditRes.ok) {
-        const auditData = await auditRes.json();
-        setAuditLogs(auditData.logs || []);
-        setAuditError(null);
-      } else if (auditRes.status === 401 || auditRes.status === 403) {
-        setAuditError('Administrator clearance required to view logs.');
-      }
-    } catch (err) {
-      console.error("Failed to fetch team data:", err);
-    } finally {
-      setLoading(false);
-    }
-  };
+  const fetchTeamData = useCallback(() => Promise.all([
+    apiFetch('/api/users').then(response => response.json()),
+    apiFetch('/api/admin/audit-logs').then(response => response.json()),
+  ]).then(([userData, auditData]) => {
+    setTeamMembers(userData.users.map(user => ({
+      id: user.id, name: user.full_name || user.username, email: user.email,
+      role: user.role, status: user.is_active ? 'Active' : 'Suspended',
+      mfa: 'Unavailable', lastLogin: 'Not tracked',
+    })));
+    setAuditLogs(auditData.logs || []); setAuditError(null);
+  }).catch(error => setAuditError(error.message)).finally(() => setLoading(false)), []);
 
   useEffect(() => {
     fetchTeamData();
-  }, []);
+  }, [fetchTeamData]);
 
   const handleSendInvite = async (e) => {
     e.preventDefault();
     if (!inviteEmail) return;
-    
+
     setInviteLoading(true);
     setInviteMessage(null);
 
     try {
-      const response = await fetch('http://35.154.0.127:8000/api/users/invite', {
+      const response = await apiFetch('/api/users/invite', {
         method: 'POST',
-        headers: getAuthHeaders(),
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: inviteEmail, role: inviteRole })
       });
 
@@ -108,7 +75,7 @@ const TeamManagement = () => {
         setInviteMessage({ type: 'error', text: data.detail || 'Failed to send invite' });
       }
     } catch (err) {
-      setInviteMessage({ type: 'error', text: 'Network connection error.' });
+      setInviteMessage({ type: 'error', text: err.message });
     } finally {
       setInviteLoading(false);
     }
@@ -132,12 +99,12 @@ const TeamManagement = () => {
     setEditMessage(null);
 
     try {
-      const response = await fetch(`http://35.154.0.127:8000/api/users/${editingUser.id}`, {
+      const response = await apiFetch(`/api/users/${editingUser.id}`, {
         method: 'PUT',
-        headers: getAuthHeaders(),
-        body: JSON.stringify({ 
-          role: editingUser.role, 
-          is_active: editingUser.isActive 
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          role: editingUser.role,
+          is_active: editingUser.isActive
         })
       });
 
@@ -151,7 +118,7 @@ const TeamManagement = () => {
         setEditMessage({ type: 'error', text: data.detail || 'Failed to update user' });
       }
     } catch (err) {
-      setEditMessage({ type: 'error', text: 'Network connection error.' });
+      setEditMessage({ type: 'error', text: err.message });
     } finally {
       setEditLoading(false);
     }
@@ -176,21 +143,21 @@ const TeamManagement = () => {
   const borderSubtle = 'border-black/[0.05] dark:border-white/[0.07]';
   const inputStyle = 'w-full rounded-lg px-4 py-3 sm:py-2.5 text-[14px] sm:text-[13px] bg-black/[0.02] dark:bg-white/[0.03] border border-black/[0.06] dark:border-white/[0.07] focus:border-black/20 dark:focus:border-white/20 text-[#1D1D1F] dark:text-[#F2F2F0] focus:outline-none transition-colors';
 
-  const filteredMembers = teamMembers.filter(member => 
+  const filteredMembers = teamMembers.filter(member =>
     filterRole === 'All' || member.role.toLowerCase().includes(filterRole.toLowerCase())
   );
 
   return (
     <div className="space-y-6 transition-colors duration-500 relative">
-      
+
       {/* ---------------- EDIT USER MODAL ---------------- */}
       <AnimatePresence>
         {isEditModalOpen && editingUser && (
-          <motion.div 
+          <motion.div
             initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
             className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/20 dark:bg-black/60 backdrop-blur-md p-4 sm:p-0"
           >
-            <motion.div 
+            <motion.div
               variants={modalVariants} initial="hidden" animate="visible" exit="exit"
               className="bg-white/95 dark:bg-[#1C1C1E]/95 border border-black/10 dark:border-white/10 shadow-2xl rounded-t-2xl sm:rounded-2xl w-full max-w-sm overflow-hidden pb-safe"
             >
@@ -200,14 +167,14 @@ const TeamManagement = () => {
                   <svg className="w-5 h-5 sm:w-4 sm:h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
                 </button>
               </div>
-              
+
               <form onSubmit={handleUpdateUser} className="p-6 space-y-5">
                 {editMessage && (
                   <div className={`p-3 rounded-lg text-[12px] font-medium ${editMessage.type === 'success' ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20' : 'bg-red-500/10 text-red-600 dark:text-red-400 border border-red-500/20'}`}>
                     {editMessage.text}
                   </div>
                 )}
-                
+
                 <div>
                   <div className={`text-[13px] font-semibold ${textPrimary}`}>{editingUser.name}</div>
                   <div className={`text-[11px] ${textMuted}`}>{editingUser.email}</div>
@@ -215,21 +182,21 @@ const TeamManagement = () => {
 
                 <div className="pt-2">
                   <label className={`block text-[11px] font-semibold uppercase tracking-wider ${textMuted} mb-2`}>Account Role</label>
-                  <select 
-                    value={editingUser.role} 
+                  <select
+                    value={editingUser.role}
                     onChange={(e) => setEditingUser({...editingUser, role: e.target.value})}
                     className={inputStyle}
                   >
-                    <option value="Security Analyst">Security Analyst</option>
-                    <option value="Administrator">Administrator</option>
-                    <option value="Admin (Lead)">Admin (Lead)</option>
+                    <option value="analyst">Security Analyst</option>
+                    <option value="administrator">Administrator</option>
+
                   </select>
                 </div>
 
                 <div>
                   <label className={`block text-[11px] font-semibold uppercase tracking-wider ${textMuted} mb-2`}>Account Status</label>
-                  <select 
-                    value={editingUser.isActive ? "true" : "false"} 
+                  <select
+                    value={editingUser.isActive ? "true" : "false"}
                     onChange={(e) => setEditingUser({...editingUser, isActive: e.target.value === "true"})}
                     className={inputStyle}
                   >
@@ -237,7 +204,7 @@ const TeamManagement = () => {
                     <option value="false">Suspended (Revoked Access)</option>
                   </select>
                 </div>
-                
+
                 <div className="pt-4 flex gap-3">
                   <button type="button" onClick={() => setIsEditModalOpen(false)} className={`flex-1 py-3 sm:py-2.5 rounded-xl sm:rounded-lg text-[14px] sm:text-[13px] font-semibold border ${borderSubtle} ${textPrimary} hover:bg-black/5 dark:hover:bg-white/5 transition-colors`}>
                     Cancel
@@ -255,11 +222,11 @@ const TeamManagement = () => {
       {/* ---------------- INVITE MODAL ---------------- */}
       <AnimatePresence>
         {isInviteOpen && (
-          <motion.div 
+          <motion.div
             initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
             className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/20 dark:bg-black/60 backdrop-blur-md p-4 sm:p-0"
           >
-            <motion.div 
+            <motion.div
               variants={modalVariants} initial="hidden" animate="visible" exit="exit"
               className="bg-white/95 dark:bg-[#1C1C1E]/95 border border-black/10 dark:border-white/10 shadow-2xl rounded-t-2xl sm:rounded-2xl w-full max-w-sm overflow-hidden pb-safe"
             >
@@ -269,35 +236,35 @@ const TeamManagement = () => {
                   <svg className="w-5 h-5 sm:w-4 sm:h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
                 </button>
               </div>
-              
+
               <form onSubmit={handleSendInvite} className="p-6 space-y-5">
                 {inviteMessage && (
                   <div className={`p-3 rounded-lg text-[12px] font-medium ${inviteMessage.type === 'success' ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20' : 'bg-red-500/10 text-red-600 dark:text-red-400 border border-red-500/20'}`}>
                     {inviteMessage.text}
                   </div>
                 )}
-                
+
                 <div>
                   <label className={`block text-[11px] font-semibold uppercase tracking-wider ${textMuted} mb-2`}>Email Address</label>
-                  <input 
+                  <input
                     type="email" required
                     value={inviteEmail} onChange={(e) => setInviteEmail(e.target.value)}
                     placeholder="analyst@netshield.com"
                     className={inputStyle}
                   />
                 </div>
-                
+
                 <div>
                   <label className={`block text-[11px] font-semibold uppercase tracking-wider ${textMuted} mb-2`}>Access Role</label>
-                  <select 
+                  <select
                     value={inviteRole} onChange={(e) => setInviteRole(e.target.value)}
                     className={inputStyle}
                   >
-                    <option value="Security Analyst">Security Analyst</option>
-                    <option value="Administrator">Administrator</option>
+                    <option value="analyst">Security Analyst</option>
+                    <option value="administrator">Administrator</option>
                   </select>
                 </div>
-                
+
                 <div className="pt-4 flex gap-3">
                   <button type="button" onClick={() => setIsInviteOpen(false)} className={`flex-1 py-3 sm:py-2.5 rounded-xl sm:rounded-lg text-[14px] sm:text-[13px] font-semibold border ${borderSubtle} ${textPrimary} hover:bg-black/5 dark:hover:bg-white/5 transition-colors`}>
                     Cancel
@@ -312,15 +279,15 @@ const TeamManagement = () => {
         )}
       </AnimatePresence>
       {/* ---------------------------------------------- */}
-      
+
       {/* Responsive Top Header */}
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end gap-4">
         <div className="w-full sm:w-auto">
           <h2 className={`text-[24px] font-semibold tracking-tight ${textPrimary}`}>Team & Access Control</h2>
           <p className={`text-[13px] ${textMuted} mt-0.5`}>Manage user roles, monitor active sessions, and review audit logs</p>
         </div>
-        <button 
-          onClick={() => setIsInviteOpen(true)}
+        <button
+          disabled title="Invitation delivery is unavailable" onClick={() => setIsInviteOpen(true)}
           className="w-full sm:w-auto justify-center px-5 py-3 sm:px-4 sm:py-2 text-[14px] sm:text-[13px] font-semibold rounded-xl sm:rounded-lg transition-colors active:scale-95 flex items-center gap-2 shadow-sm bg-black dark:bg-white text-white dark:text-black hover:bg-gray-800 dark:hover:bg-gray-200 cursor-pointer"
         >
           <svg className="w-5 h-5 sm:w-4 sm:h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
@@ -351,18 +318,18 @@ const TeamManagement = () => {
       </div>
 
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-        
+
         {/* User Management Table */}
         <motion.div {...fadeInUp} transition={{ delay: 0.3 }} className={`xl:col-span-2 ${cardMaterial} overflow-hidden flex flex-col`}>
           <div className={`px-4 sm:px-6 py-4 border-b flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 ${borderSubtle} bg-black/[0.01] dark:bg-white/[0.01]`}>
             <h2 className={`text-[15px] font-semibold tracking-tight ${textPrimary}`}>System Directory</h2>
             <div className="flex flex-wrap gap-2 w-full sm:w-auto">
               {['All', 'Admin', 'Analyst'].map((role) => (
-                <button 
+                <button
                   key={role}
                   onClick={() => setFilterRole(role)}
                   className={`flex-1 sm:flex-none px-3 py-2 sm:py-1.5 rounded-lg text-[13px] sm:text-[12px] font-semibold transition-colors ${
-                    filterRole === role 
+                    filterRole === role
                       ? 'bg-black/10 dark:bg-white/10 text-black dark:text-white'
                       : `${textMuted} hover:text-[#1D1D1F] dark:hover:text-[#F2F2F0]`
                   }`}
@@ -372,7 +339,7 @@ const TeamManagement = () => {
               ))}
             </div>
           </div>
-          
+
           <div className="overflow-x-auto min-h-[400px]">
             <table className="w-full text-left border-collapse min-w-[600px]">
               <thead>
@@ -392,9 +359,9 @@ const TeamManagement = () => {
                     <tr><td colSpan={5} className={`py-12 text-center ${textMuted}`}>No users found matching criteria.</td></tr>
                   ) : (
                     filteredMembers.map((member) => (
-                      <motion.tr 
+                      <motion.tr
                         initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-                        key={member.id} 
+                        key={member.id}
                         className="transition-colors group text-[13px] hover:bg-black/[0.02] dark:hover:bg-white/[0.02]"
                       >
                         <td className="px-6 py-4">
@@ -418,7 +385,7 @@ const TeamManagement = () => {
                           </span>
                         </td>
                         <td className="px-6 py-4 text-right">
-                          <button 
+                          <button
                             onClick={() => openEditModal(member)}
                             className={`text-[13px] sm:text-[12px] px-3 py-1.5 rounded-lg border ${borderSubtle} font-semibold transition-colors ${textMuted} hover:bg-black/5 dark:hover:bg-white/5 hover:text-[#1D1D1F] dark:hover:text-[#F2F2F0] cursor-pointer`}
                           >
@@ -476,7 +443,7 @@ const TeamManagement = () => {
           </div>
         </motion.div>
       </div>
-      
+
     </div>
   );
 };

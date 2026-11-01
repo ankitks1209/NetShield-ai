@@ -1,0 +1,14 @@
+.env
+.env.*
+venv/
+.venv/
+__pycache__/
+tests/
+*.pyc
+*.pcap
+*.pcapng
+*.log
+*.joblib
+*.pkl
+*.csv
+.DS_Store

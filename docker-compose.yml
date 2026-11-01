@@ -1,57 +1,101 @@
-version: '3.8'
-
 services:
   postgres:
     image: postgres:15
-    container_name: postgres
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_USER: netshield
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Configure POSTGRES_PASSWORD in .env}
       POSTGRES_DB: netshield
-    ports:
-      - "5432:5432"
-    networks:
-      - netshield-network
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d netshield"]
-      interval: 3s
+      test: ["CMD-SHELL", "pg_isready -U netshield -d netshield"]
+      interval: 5s
       timeout: 3s
-      retries: 5
+      retries: 10
 
   mongodb:
     image: mongo:7.0
-    container_name: netshield-ai-mongodb-1
-    command: mongod --setParameter ignoreUnknownParams=true
-    ports:
-      - "27017:27017"
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: netshield
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:?Configure MONGO_PASSWORD in .env}
     volumes:
       - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   backend:
     build: ./backend
-    container_name: backend
-    ports:
-      - "8000:8000"
-    env_file:
-      - .env
-    networks:
-      - netshield-network
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://netshield:${POSTGRES_PASSWORD}@postgres:5432/netshield
+      MONGO_URI: mongodb://netshield:${MONGO_PASSWORD}@mongodb:27017/?authSource=admin
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Configure JWT_SECRET_KEY in .env}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-60}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
+      MODEL_DIR: /models
+      DATA_DIR: /data
+      MONITORING_DATASETS: ${MONITORING_DATASETS:-}
+      REPLAY_INTERVAL_SECONDS: ${REPLAY_INTERVAL_SECONDS:-1}
+      SECURITY_WEBHOOK_URL: ${SECURITY_WEBHOOK_URL:-}
+      NOTIFY_REPLAY: ${NOTIFY_REPLAY:-false}
+    volumes:
+      - type: bind
+        source: ./ml/data/processed
+        target: /data
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./backend/rf_model_optimized.joblib
+        target: /models/rf_model_optimized.joblib
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./backend/label_encoder.joblib
+        target: /models/label_encoder.joblib
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./backend/xgboost_unsw_model.joblib
+        target: /models/xgboost_unsw_model.joblib
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./backend/label_encoder1.joblib
+        target: /models/label_encoder1.joblib
+        read_only: true
+        bind:
+          create_host_path: false
+      - ./backend/cicids_metrics.json:/models/cicids_metrics.json:ro
+      - ./backend/unsw_metrics.json:/models/unsw_metrics.json:ro
     depends_on:
       postgres:
         condition: service_healthy
       mongodb:
-        condition: service_started
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 
   frontend:
-    build: ./frontend
-    container_name: frontend
+    build: ./Frontend
+    restart: unless-stopped
     ports:
-      - "3000:3000"
-    networks:
-      - netshield-network
+      - "127.0.0.1:5173:80"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
 
-networks:
-  netshield-network:
-    driver: bridge
+volumes:
+  postgres_data:
+  mongo_data:

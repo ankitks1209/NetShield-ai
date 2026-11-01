@@ -1,4 +1,3 @@
-import React from 'react';
 import { Routes, Route } from 'react-router-dom';
 import { Toaster } from 'react-hot-toast';
 import ProtectedRoute from './components/ProtectedRoute';
@@ -29,13 +28,13 @@ import ModelPerformance from './pages/ModelPerformance';
 function App() {
   return (
     <>
-      <Toaster 
-        position="top-right" 
+      <Toaster
+        position="top-right"
         containerStyle={{ top: 70 }}
-        reverseOrder={false} 
+        reverseOrder={false}
         toastOptions={{
           // Apple default response time
-          duration: 5000, 
+          duration: 5000,
           // We set background transparent because our custom toast payload will handle the glass material
           style: {
             background: 'transparent',
@@ -61,11 +60,11 @@ function App() {
             <Route path="performance" element={<ModelPerformance />} />
             <Route path="threats" element={<ThreatDetection />} />
             <Route path="alerts" element={<Alerts />} />
-            <Route path="logs" element={<Logs />} />
+            <Route path="logs" element={<ProtectedRoute allowedRoles={['administrator']}><Logs /></ProtectedRoute>} />
             <Route path="devices" element={<Devices />} />
             <Route path="analytics" element={<Analytics />} />
             <Route path="security" element={<SecurityAnalytics />} />
-            
+
             {/* Flat Protected Admin Routes */}
             <Route path="team" element={<ProtectedRoute allowedRoles={['administrator', 'admin', 'admin (lead)']}><TeamManagement /></ProtectedRoute>} />
             <Route path="settings" element={<ProtectedRoute allowedRoles={['administrator', 'admin', 'admin (lead)']}><Settings /></ProtectedRoute>} />

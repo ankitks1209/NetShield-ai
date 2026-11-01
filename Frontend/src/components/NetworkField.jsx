@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import { useEffect, useRef } from 'react';
 
 // Shared network-node background. Moves on scroll with momentum + mouse repulsion.
 // Now accepts `isDark` to dynamically transition colors without breaking the animation loop.
@@ -44,7 +44,7 @@ const NetworkField = ({ isDark }) => {
     const draw = () => {
       ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
       const mouse = mouseRef.current;
-      
+
       // Dynamic color based on theme
       const rgb = themeRef.current ? '255, 255, 255' : '10, 10, 11';
 
@@ -71,8 +71,8 @@ const NetworkField = ({ isDark }) => {
         const dy = n.y - mouse.y;
         const distToMouse = Math.hypot(dx, dy);
         let glow = 1.2 + Math.sin(n.pulse) * 0.5;
-        
-        if (distToMouse < 120) {
+
+        if (distToMouse > 0 && distToMouse < 120) {
           const force = (120 - distToMouse) / 120;
           n.x += (dx / distToMouse) * force * 1.5;
           n.y += (dy / distToMouse) * force * 1.5;
@@ -111,12 +111,14 @@ const NetworkField = ({ isDark }) => {
     init();
     draw();
 
-    window.addEventListener('resize', () => { resize(); init(); });
+    const handleResize = () => { resize(); init(); };
+    window.addEventListener('resize', handleResize);
     window.addEventListener('mousemove', handleMouseMove);
     window.addEventListener('scroll', handleScroll);
 
     return () => {
       cancelAnimationFrame(animationId);
+      window.removeEventListener('resize', handleResize);
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('scroll', handleScroll);
     };

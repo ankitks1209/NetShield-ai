@@ -1,7 +1,8 @@
-import React, { useState, useEffect, useRef } from 'react';
+import { apiFetch } from '../services/api';
+import { useState, useEffect, useRef } from 'react';
 import { useOutletContext } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { useAuth } from '../context/AuthContext';
+import { useAuth } from '../context/auth';
 
 const fadeInUp = {
   initial: { opacity: 0, y: 15 },
@@ -17,21 +18,24 @@ const modalVariants = {
 
 const Profile = () => {
   const outletContext = useOutletContext() || {};
-  const isDark = outletContext.theme !== 'light'; 
+  const isDark = outletContext.theme !== 'light';
   const authContext = useAuth() || {};
   const user = authContext.user || null;
 
-  const [formData, setFormData] = useState({ firstName: '', lastName: '', email: '' });
+  const [formData, setFormData] = useState(() => {
+    const parts = (user?.full_name || user?.username || '').split(' ');
+    return { firstName: parts[0] || '', lastName: parts.slice(1).join(' '), email: user?.email || '' };
+  });
   const [isSaving, setIsSaving] = useState(false);
   const [saveMessage, setSaveMessage] = useState(null);
-  
+
   const [sessions, setSessions] = useState([]);
   const [loadingSessions, setLoadingSessions] = useState(true);
 
   // Modals & Avatar State
-  const [avatarUrl, setAvatarUrl] = useState(null);
+  const [avatarUrl, setAvatarUrl] = useState(() => localStorage.getItem('user_avatar'));
   const fileInputRef = useRef(null);
-  
+
   const [isPasswordModalOpen, setIsPasswordModalOpen] = useState(false);
   const [passwordData, setPasswordData] = useState({ current: '', new: '', confirm: '' });
   const [passwordStatus, setPasswordStatus] = useState(null);
@@ -39,33 +43,12 @@ const Profile = () => {
 
   const [is2FAModalOpen, setIs2FAModalOpen] = useState(false);
 
-  // Load saved avatar from LocalStorage on mount
-  useEffect(() => {
-    const savedAvatar = localStorage.getItem('user_avatar');
-    if (savedAvatar) {
-      setAvatarUrl(savedAvatar);
-    }
-  }, []);
-
-  // Sync context user data to local form state
-  useEffect(() => {
-    if (user) {
-      const nameString = user.full_name || user.username || 'Admin User';
-      const parts = nameString.split(' ');
-      setFormData({
-        firstName: parts[0] || '',
-        lastName: parts.slice(1).join(' ') || '',
-        email: user.email || ''
-      });
-    }
-  }, [user]);
-
   // Fetch Live Sessions
   useEffect(() => {
     const fetchSessions = async () => {
       try {
         const token = localStorage.getItem('token') || localStorage.getItem('access_token');
-        const res = await fetch('http://35.154.0.127:8000/api/users/sessions', {
+        const res = await apiFetch('/api/users/sessions', {
           headers: {
             'Content-Type': 'application/json',
             ...(token ? { 'Authorization': `Bearer ${token}` } : {})
@@ -77,11 +60,9 @@ const Profile = () => {
         } else {
           throw new Error("Sessions unauthorized");
         }
-      } catch (err) {
-        console.warn("Using fallback sessions.");
-        setSessions([
-          { id: 'sess_01', device: 'Apple MacBook Air - Chrome', location: 'Udaipur, India', time: 'Current Session', ip: '103.119.24.11', active: true }
-        ]);
+      } catch {
+        console.warn("Session inventory unavailable.");
+        setSessions([]);
       } finally {
         setLoadingSessions(false);
       }
@@ -95,7 +76,7 @@ const Profile = () => {
     setSaveMessage(null);
     try {
       const token = localStorage.getItem('token') || localStorage.getItem('access_token');
-      const res = await fetch('http://35.154.0.127:8000/api/users/profile', {
+      const res = await apiFetch('/api/users/profile', {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -106,9 +87,9 @@ const Profile = () => {
           email: formData.email
         })
       });
-      
+
       const data = await res.json();
-      
+
       if (res.ok) {
         setSaveMessage({ type: 'success', text: 'Profile updated successfully.' });
         if (data.user) {
@@ -121,11 +102,11 @@ const Profile = () => {
       } else {
         setSaveMessage({ type: 'error', text: data.detail || 'Failed to update profile.' });
       }
-    } catch (err) {
+    } catch {
       setSaveMessage({ type: 'error', text: 'Network error. Could not reach server.' });
     } finally {
       setIsSaving(false);
-    } 
+    }
   };
 
   // Avatar Upload Handler (With HTML5 Image Compression to bypass 5MB Storage Limit)
@@ -142,16 +123,16 @@ const Profile = () => {
           const scaleSize = MAX_WIDTH / img.width;
           canvas.width = MAX_WIDTH;
           canvas.height = img.height * scaleSize;
-          
+
           const ctx = canvas.getContext('2d');
           ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-          
+
           const compressedBase64 = canvas.toDataURL('image/jpeg', 0.8);
           setAvatarUrl(compressedBase64);
-          
+
           try {
             localStorage.setItem('user_avatar', compressedBase64);
-          } catch (storageError) {
+          } catch {
             console.error("Storage quota exceeded even after compression.");
           }
         };
@@ -168,13 +149,13 @@ const Profile = () => {
       setPasswordStatus({ type: 'error', text: 'New passwords do not match.' });
       return;
     }
-    
+
     setIsUpdatingPassword(true);
     setPasswordStatus(null);
-    
+
     try {
       const token = localStorage.getItem('token') || localStorage.getItem('access_token');
-      const res = await fetch('http://35.154.0.127:8000/api/users/password', {
+      const res = await apiFetch('/api/users/password', {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -185,10 +166,11 @@ const Profile = () => {
           new_password: passwordData.new
         })
       });
-      
+
       const data = await res.json();
       if (res.ok) {
-        setPasswordStatus({ type: 'success', text: 'Password updated securely.' });
+        setPasswordStatus({ type: 'success', text: 'Password changed. Sign in again.' });
+        window.dispatchEvent(new Event('netshield:unauthorized'));
         setTimeout(() => {
           setIsPasswordModalOpen(false);
           setPasswordData({ current: '', new: '', confirm: '' });
@@ -197,7 +179,7 @@ const Profile = () => {
       } else {
         setPasswordStatus({ type: 'error', text: data.detail || 'Failed to update password.' });
       }
-    } catch (err) {
+    } catch {
       setPasswordStatus({ type: 'error', text: 'Network error communicating with server.' });
     } finally {
       setIsUpdatingPassword(false);
@@ -218,7 +200,7 @@ const Profile = () => {
 
   return (
     <div className="space-y-6 max-w-4xl transition-colors duration-500 relative">
-      
+
       {/* --- PASSWORD MODAL --- */}
       <AnimatePresence>
         {isPasswordModalOpen && (
@@ -267,11 +249,10 @@ const Profile = () => {
               <div className="w-16 h-16 mx-auto bg-emerald-500/10 text-emerald-500 rounded-full flex items-center justify-center mb-4">
                 <svg className="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" /></svg>
               </div>
-              <h3 className={`text-[18px] font-semibold tracking-tight ${textPrimary} mb-2`}>2FA is Active</h3>
-              <p className={`text-[13px] ${textMuted} mb-6`}>Your account is currently secured by an authenticator app. Disable it to reconfigure your device.</p>
+              <h3 className={`text-[18px] font-semibold tracking-tight ${textPrimary} mb-2`}>Two-factor authentication unavailable</h3>
+              <p className={`text-[13px] ${textMuted} mb-6`}>Authenticator enrollment is not supported in this version.</p>
               <div className="flex gap-3">
                 <button onClick={() => setIs2FAModalOpen(false)} className={`flex-1 py-2.5 rounded-lg text-[13px] font-semibold border ${borderSubtle} ${textPrimary} hover:bg-black/5 dark:hover:bg-white/5 transition-colors`}>Close</button>
-                <button onClick={() => setIs2FAModalOpen(false)} className="flex-1 py-2.5 rounded-lg text-[13px] font-semibold bg-red-500 text-white hover:bg-red-600 transition-colors">Disable 2FA</button>
               </div>
             </motion.div>
           </motion.div>
@@ -285,13 +266,13 @@ const Profile = () => {
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        
+
         {/* Left Column - Avatar */}
         <div className="col-span-1 space-y-6">
           <motion.div {...fadeInUp} className={`${cardMaterial} p-6 flex flex-col items-center text-center`}>
             {/* Hidden File Input */}
             <input type="file" accept="image/*" ref={fileInputRef} onChange={handleAvatarChange} className="hidden" />
-            
+
             <div className="w-24 h-24 rounded-full bg-black/5 dark:bg-white/10 flex items-center justify-center text-[28px] font-bold text-[#1D1D1F] dark:text-white mb-4 shadow-sm overflow-hidden border-2 border-transparent hover:border-black/10 dark:hover:border-white/20 transition-colors cursor-pointer" onClick={() => fileInputRef.current.click()}>
               {avatarUrl ? (
                 <img src={avatarUrl} alt="Avatar" className="w-full h-full object-cover" />
@@ -299,7 +280,7 @@ const Profile = () => {
                 getInitials(formData.firstName, formData.lastName)
               )}
             </div>
-            
+
             <h3 className={`text-[16px] font-semibold tracking-tight ${textPrimary}`}>
               {user?.full_name || user?.username || 'Admin User'}
             </h3>
@@ -314,7 +295,7 @@ const Profile = () => {
 
         {/* Right Column - Forms & Settings */}
         <div className="col-span-1 md:col-span-2 space-y-6">
-          
+
           {/* Personal Information */}
           <motion.div {...fadeInUp} transition={{ delay: 0.1 }} className={`${cardMaterial} p-6 sm:p-8`}>
             <h3 className={`text-[16px] font-semibold tracking-tight ${textPrimary} mb-5`}>Personal Information</h3>
@@ -357,14 +338,14 @@ const Profile = () => {
                   Update Password
                 </button>
               </div>
-              
+
               <div className={`border-t ${borderSubtle} pt-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4`}>
                 <div>
                   <div className={`text-[14px] font-semibold ${textPrimary}`}>Two-Factor Authentication (2FA)</div>
                   <div className="text-[12px] text-emerald-600 dark:text-emerald-500 mt-0.5 font-medium">Currently Enabled via Authenticator App</div>
                 </div>
                 <button onClick={() => setIs2FAModalOpen(true)} className={`px-5 py-2.5 bg-black/5 dark:bg-white/[0.04] hover:bg-black/10 dark:hover:bg-white/[0.08] border ${borderSubtle} ${textPrimary} text-[12px] font-semibold rounded-lg transition-colors whitespace-nowrap`}>
-                  Manage 2FA
+                  View availability
                 </button>
               </div>
             </div>
@@ -386,7 +367,7 @@ const Profile = () => {
                     <div className="flex items-center gap-4">
                       <div className={`p-2.5 rounded-full ${isDark ? 'bg-white/5' : 'bg-black/5'}`}>
                         <svg className={`w-5 h-5 ${textMuted}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          {session.active 
+                          {session.active
                             ? <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
                             : <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z" />
                           }
@@ -394,7 +375,7 @@ const Profile = () => {
                       </div>
                       <div>
                         <div className={`text-[14px] font-semibold ${textPrimary} flex items-center gap-2`}>
-                          {session.device} 
+                          {session.device}
                           {session.active && <span className="bg-emerald-500/10 border border-emerald-500/20 text-emerald-600 dark:text-emerald-400 text-[9px] px-2 py-0.5 rounded uppercase font-bold tracking-wider">Active</span>}
                         </div>
                         <div className={`text-[12px] ${textMuted} mt-0.5`}>{session.location} • {session.ip} • {session.time}</div>

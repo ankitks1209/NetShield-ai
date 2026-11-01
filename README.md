@@ -1,138 +1,142 @@
-# NetShield AI: Real-Time Network Anomaly Detection & Threat Monitoring System
+# NetShield AI
 
-![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)
-![React](https://img.shields.io/badge/React-18.x-blue.svg)
-![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-teal.svg)
-![Docker](https://img.shields.io/badge/Docker-Supported-blue.svg)
+NetShield AI combines authenticated flow monitoring, supervised dataset classification, and persistent incident triage. The existing Apple-style glassmorphism interface is preserved.
 
-NetShield AI is a containerized, AI-powered cybersecurity platform designed to continuously monitor live network traffic, identify suspicious behavior, predict potential intrusions, and generate real-time threat alerts.
+This version repairs the security and ingestion foundation. It does **not** claim validated live intrusion classification, zero-day prediction, lossless capture, or production accuracy.
 
-Built as a dual-engine machine learning system, it leverages an asynchronous WebSocket pipeline to stream packets from a live network monitor directly through an inference engine to a React-based command center, achieving sub-second threat visualization and incident logging.
+## Data paths
 
----
+- **CICIDS2017 / UNSW-NB15 replay:** one collector per configured dataset processes every row once per API process. Viewers subscribe to results; opening or closing a browser does not start or stop collection.
+- **Live Zeek:** reads standard JSON or TSV `conn.log`, preserves endpoint direction, UTC event time, duration in seconds, payload bytes, IP bytes, and packet counts. Complete-line checkpoints are saved after durable flow writes. Rotation and copy-truncation are handled; malformed and incomplete records are reported.
+- **REST inference:** uses the same model input contract and persistent incident service as replay.
+- **Simulations:** marked explicitly, excluded from operational metrics by default, and never sent to webhooks.
 
-## System Architecture
+Live Zeek records currently carry an **UNKNOWN** verdict. The old four-field/zero-filled CICIDS vector was invalid and has been removed. A tested Zeek-specific feature/model pipeline is required before enabling live classification. Completed Zeek connection logs are flow records, not a per-packet feed: long-lived connections may be logged later than individual packets.
 
-NetShield AI utilizes a decoupled microservices architecture deployed via Docker Compose. This ensures high throughput and prevents state collisions between data persistence and real-time inference. The system follows a clear pipeline from network ingestion to user visualization:
+## Requirements and setup
 
-1. **Traffic Collection:** A live network sniffer (Zeek) captures raw traffic from the network interface and standardizes disparate packet schemas into a unified JSON stream.
-2. **Traffic Preprocessing & Feature Extraction:** The pipeline cleans the data, handles missing values, and extracts crucial statistical and flow-based features required for machine learning analysis.
-3. **Anomaly Detection & Intrusion Prediction (AI/ML Models):** An asynchronous FastAPI backend routes packets through a dual-classification system:
-   * **Random Forest:** Provides robust baseline anomaly detection for generalized threats.
-   * **XGBoost:** Delivers high-performance gradient boosting to catch subtle, complex threat signatures and assign a Threat Risk Score.
-4. **Alert & Response:** The system instantly generates automated threat alerts based on attack severity and confidence scores.
-5. **Data & Storage Layer:** 
-   * **MongoDB:** A high-throughput NoSQL database dedicated to logging all detected session anomalies and raw packet telemetry.
-   * **PostgreSQL:** Serves as the relational anchor for Role-Based Access Control (RBAC) and immutable system audit trails.
-6. **Web/Application Portal:** A Vite-powered React dashboard connects directly to the backend via WebSockets. It maps live packet throughput and threat logs instantly without UI lag or polling overhead.
+Use Docker Compose v2, or Python with the backend requirements and a Node version supported by the checked-in Vite version. The backend Docker image uses Python 3.12; the frontend builder uses Node 20. Existing model files are trusted joblib artifacts and must be supplied locally; never load untrusted joblib/pickle files.
 
----
+The following files are intentionally excluded from Git:
 
-## Machine Learning Methodology & Datasets
+- `backend/rf_model_optimized.joblib` and `backend/label_encoder.joblib`
+- `backend/xgboost_unsw_model.joblib` and `backend/label_encoder1.joblib`
+- `ml/data/processed/cicids2017_clean.csv` and `ml/data/processed/unsw_nb15_clean.csv`
+- Secret environment files, captures, virtual environments, and sensor logs.
 
-To ensure reliable intrusion prediction, the AI modules were trained and validated against industry-standard cybersecurity datasets:
-* **CICIDS2017:** Utilized for training the model to recognize modern attack vectors including Brute Force, DoS, Web Attacks, and Infiltration.
-* **UNSW-NB15:** Utilized for analyzing hybrid synthetic and real modern normal activities alongside contemporary synthesized attack behaviors.
+A fresh clone needs these artifacts before starting the current Compose configuration. A reproducible training/export pipeline remains a separate milestone.
 
-The models evaluate real-time features against these learned baselines to output a classification verdict (Benign vs. specific Threat type) alongside a confidence interval.
+### Docker deployment
 
----
+1. Copy `.env.example` to `.env`. Preserve any existing private configuration before replacing it.
+2. Generate **different** random values for JWT_SECRET_KEY, POSTGRES_PASSWORD, and MONGO_PASSWORD. Use hex secrets so they can safely appear in connection URLs:
 
-## Key Features
-
-* **Real-Time Live Streaming:** WebSocket integration bypasses legacy REST API polling, feeding live network packets to the UI with minimal latency.
-* **Monotonic State Management:** Advanced React state logic prevents UI jitter and backward-jumping counters during rapid packet influxes.
-* **Timezone Consistency:** Built-in ISO UTC parsing ensures threat logs display accurately in local browser timezones across geographic deployments.
-* **Dynamic Data Mapping:** A universal metric extraction protocol ensures charts animate smoothly regardless of whether the incoming data originates from static training datasets or live Zeek JSON feeds.
-* **Secure Containerization:** Fully orchestrated using Docker and Docker Compose for seamless cloud deployment and environment parity.
-
----
-
-## Technology Stack
-
-| Category | Technologies |
-| :--- | :--- |
-| **Frontend** | React.js, Vite, Tailwind CSS, Chart.js, Framer Motion |
-| **Backend** | Python, FastAPI, WebSockets, JWT Authentication |
-| **Databases** | MongoDB (NoSQL Persistence), PostgreSQL (SQL Audit) |
-| **AI / Machine Learning** | Scikit-learn, XGBoost, Pandas, NumPy |
-| **DevOps & Cloud** | Docker, Docker Compose, AWS EC2 |
-| **Network Monitoring** | Zeek (Packet Capture), Wireshark |
-
----
-
-## Project Structure
-
-```text
-NetShield-ai/
-├── Frontend/               # React.js UI, Tailwind CSS, Vite configuration
-│   ├── src/
-│   │   ├── components/     # Reusable UI widgets and charts
-│   │   ├── context/        # React Context API for global state and WebSockets
-│   │   └── pages/          # Dashboard, Network Traffic, Anomaly Detection views
-│   └── Dockerfile          # Frontend container configuration
-├── backend/                # FastAPI application, Python ML inference logic
-│   ├── main.py             # API routing and WebSocket stream handlers
-│   ├── models/             # Pickled Random Forest and XGBoost model files
-│   ├── mongodb.py          # NoSQL database connection and schemas
-│   └── Dockerfile          # Backend container configuration
-├── ml/                     # Original Jupyter notebooks for dataset training
-├── docker-compose.yml      # Orchestration file for all microservices
-└── README.md               # Project documentation
-
----
-
-## Installation & Deployment
-
-The system is fully containerized, making deployment straightforward on a local machine or a cloud instance (e.g., AWS EC2 Ubuntu).
-
-### Prerequisites
-
-* Docker and Docker Compose installed on the host machine.
-* Ensure network ports `80`, `5173`, `8000`, `5432`, and `27017` are available.
-
-### Quick Start Guide
-
-1. **Clone the Repository:**
 ```bash
-git clone [https://github.com/ankitks1209/NetShield-ai.git](https://github.com/ankitks1209/NetShield-ai.git)
-cd NetShield-ai
-
+python3 -c 'import secrets; print(secrets.token_hex(32))'
 ```
 
+3. Configure monitoring sources. Empty MONITORING_DATASETS disables collection; `cicids2017,unsw-nb15` enables both finite replays.
+4. Validate and start:
 
-2. **Environment Configuration:**
-Create a `.env` file in the root directory to define database credentials, JWT secrets, and environment-specific variables.
-3. **Build and Spin Up Containers:**
-Run the orchestration command to pull the required images and build the custom frontend/backend network stack:
 ```bash
+docker compose config --quiet
 docker compose up -d --build
-
-```
-
-
-4. **Verify Services:**
-Check that all primary containers are running successfully:
-```bash
 docker compose ps
-
 ```
 
+5. Open [NetShield AI locally](http://localhost:5173). The application uses same-origin API and WebSocket proxies. Databases and the backend are private to the Compose network; no database ports are published.
+6. Provision an administrator explicitly:
 
-5. **Access the Dashboard:**
-Open your browser and navigate to:
-* **Local Deployment:** `http://localhost:5173`
-* **Cloud Deployment:** `http://35.154.0.127:5173`
+```bash
+docker compose exec backend python bootstrap_admin.py --email admin@example.com --username admin --name "SOC Administrator"
+```
 
+The command prompts for a password without printing it. It creates or promotes the specified account and invalidates that account's previous access tokens. Public registration only grants analyst access.
 
+The frontend is bound to localhost. For remote access, configure a TLS reverse proxy and explicit CORS_ORIGINS. Use a single backend worker: the collector/broadcast coordinator is process-local. Multiple replicas require a shared worker/broker and shared rate limiter.
 
----
+PostgreSQL and MongoDB use named volumes. Changing initialization passwords does not update credentials in existing volumes. Back up existing data and migrate accounts deliberately; do not delete volumes to fix authentication. The current Compose Mongo application account is the initialization administrator; provision a database-scoped account before production deployment.
 
-## Performance & Quantitative Goals
+### Direct local development
 
-The NetShield AI platform successfully achieves the targeted quantitative goals established for enterprise network security monitoring:
+Configure DATABASE_URL, MONGO_URI (or legacy MONGO_URL), JWT_SECRET_KEY, and explicit CORS_ORIGINS in your private environment. Settings load root `.env` and then `backend/.env` without overriding existing environment variables. Avoid conflicting MONGO_URL/MONGO_URI definitions.
 
-* **Accurate Threat Detection:** Reliable identification of unusual network behavior and anomaly classification.
-* **Alert Generation Latency:** Zero-lag generation of threat alerts immediately upon AI classification via the WebSocket pipeline.
-* **High-Volume Stability:** The decoupled microservice architecture successfully supports continuous monitoring without dropping packet telemetry or locking the persistence databases.
+```bash
+python3 -m venv backend/.venv
+backend/.venv/bin/pip install -r backend/requirements.txt
+cd backend
+.venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000
+```
 
+In another terminal, from Frontend:
+
+```bash
+npm ci
+npm run dev
+```
+
+Vite proxies /api and /ws to localhost:8000. VITE_API_BASE_URL is optional; if specified, it must point to the intended backend and its origin must be allowed. HTTPS pages derive wss:// automatically.
+
+## Zeek sensor configuration
+
+Capture traffic on a host/interface you administer. A Mac running Docker Desktop does not automatically expose its Wi-Fi traffic to a container. For network-wide visibility, deploy a sensor on a mirrored/SPAN port, TAP, or other authorized observation point.
+
+Run Zeek on that sensor, writing to a dedicated log directory. For example, after choosing the actual capture interface and obtaining capture permissions:
+
+```bash
+mkdir -p sensor-logs
+cd sensor-logs
+# Substitute the actual authorized interface.
+sudo zeek -i en0 -e 'redef LogAscii::use_json = T;'
+```
+
+Standard Zeek TSV also works; JSON is not required. Set ZEEK_LOG_DIR to the **absolute directory**, not the individual file, and run:
+
+```bash
+docker compose -f docker-compose.yml -f compose.zeek.yml config --quiet
+docker compose -f docker-compose.yml -f compose.zeek.yml up -d --build
+```
+
+For direct Python execution, set MONITORING_DATASETS=live_network, ZEEK_LOG_PATH to conn.log, and a unique SENSOR_ID. The reader starts at the beginning when there is no valid checkpoint; after restart it resumes from the last persisted complete line. It reads the new file from the beginning after rotation and drains the old descriptor first. Stable sensor/UID/event-time identifiers make replayed writes idempotent.
+
+Check the authenticated /api/network/status response for processed counts, last flow event time, malformed-line count, waiting/unavailable state, stale data, and future-clock detection. ZEEK_STALE_SECONDS defaults to 120; this is a source-freshness threshold, not a measured packet-drop rate. Capture loss is explicitly unmeasured until capture-health telemetry is integrated.
+
+## Detection and incident behavior
+
+All operational API routes require a valid token. Admin permissions are required for account administration, settings, audit views, and model operations. Suspension is enforced on every authenticated request, including periodic WebSocket revalidation. Password changes invalidate existing tokens. Login throttling is bounded and process-local.
+
+WebSockets authenticate in their first frame before receiving telemetry; long-lived credentials are not included in URLs. The frontend connects only after authentication, clears access on logout, and reconnects with backoff. A slow subscriber receives an explicit resynchronization signal and reloads durable incidents.
+
+Feature lengths, names, target exclusion, supported datasets, numeric conversion, and finite values are checked. Invalid features return 422; offline/failed inference returns 503, never BENIGN. The legacy UNSW model expects 194 encoded columns; a compatibility adapter reconstructs its documented one-hot input schema. It is not a reproduced or independently validated training pipeline.
+
+Each anomalous result has a canonical server incident ID, actual model confidence, model version, and severity based on attack type. Priority is a documented incident-severity heuristic, not a future attack probability. Incidents support assignment to active users, validated status values, actor-attributed notes/history, and authenticated CSV exports. Simulations can be included explicitly with include_simulated=true. Export limits are explicit rather than silently truncating records; CSV formula cells are escaped.
+
+Optional SECURITY_WEBHOOK_URL enables high/critical incident delivery. HTTPS is required outside localhost. Delivery state and bounded retries are persisted. Simulations never notify; replay only notifies when NOTIFY_REPLAY=true. Delivery is at least once: a crash after remote delivery but before recording success can cause a duplicate. The incident ID is included as an idempotency key.
+
+MFA, invitation delivery, automatic firewall response, runtime settings changes, and online retraining remain unavailable. Their controls retain the existing design but cannot claim successful execution. Saved benchmark scores are labeled as legacy results rather than production accuracy.
+
+## Verification
+
+From the repository root:
+
+```bash
+backend/.venv/bin/python -m unittest discover -s backend/tests -v
+cd Frontend
+npm run lint
+npm run build
+```
+
+If using the existing local backend/venv, substitute that interpreter path. Tests use isolated SQLite, an in-memory Mongo substitute, controlled models, and synthetic traffic. They never use production databases. When Zeek is installed, an integration test creates a synthetic two-packet PCAP, runs the real Zeek executable offline in JSON and TSV modes, and verifies equivalent normalized flow data. No test packets are sent over the network.
+
+The existing local model artifacts load and produce sample predictions, but emit scikit-learn/XGBoost serialization-version warnings. Re-export/retrain models in a pinned, reproduced environment before treating their results as production validated.
+
+Docker configuration was reviewed statically in this development environment; Docker itself was unavailable. Real PostgreSQL/Mongo deployment, sustained capture, packet-loss measurement, backup/restore, held-out ML evaluation, and cloud deployment remain to be validated.
+
+## Next milestones
+
+1. Reproduce training and held-out evaluation, preserve the UNSW official split, remove row identifiers as learning features, export preprocessing with each estimator, and publish per-class recall/F1, confusion matrices, false-positive rates, and artifact/runtime versions.
+2. Train/evaluate against the exact Zeek feature contract before enabling live attack verdicts.
+3. Add sensor packet-drop/health telemetry, retention enforcement, schema migrations, backup/restore verification, least-privilege database provisioning, and shared multi-instance coordination.
+4. Complete real invitations/MFA and controlled response integrations only with their full backend lifecycle.
+
+The original audit is preserved in PROJECT_REVIEW.md. The pre-improvement recovery point is Git tag `pre-improvements-2026-11-01`.

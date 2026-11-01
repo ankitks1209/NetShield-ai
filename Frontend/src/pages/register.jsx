@@ -1,11 +1,11 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import NetworkField from '../components/NetworkField';
 import { authAPI } from '../services/api';
 
 const Register = () => {
   const navigate = useNavigate();
-  
+
   // Theme sync with localStorage
   const [isDark, setIsDark] = useState(() => {
     return localStorage.getItem('theme') !== 'light';
@@ -20,7 +20,6 @@ const Register = () => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
-  const [role, setRole] = useState('analyst');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
@@ -34,12 +33,11 @@ const Register = () => {
     setLoading(true);
 
     try {
-      await authAPI.register({ 
-        full_name: fullName, 
-        username, 
-        email, 
-        password, 
-        role 
+      await authAPI.register({
+        full_name: fullName,
+        username,
+        email,
+        password
       });
       navigate('/login');
     } catch (err) {
@@ -61,14 +59,6 @@ const Register = () => {
   const btnPrimaryBg = isDark ? 'bg-white text-[#0A0A0B] hover:bg-[#E5E5E2]' : 'bg-[#0A0A0B] text-white hover:bg-[#222]';
   const dotColor = isDark ? 'bg-white' : 'bg-[#0A0A0B]';
 
-  // Role button dynamic states
-  const roleActive = isDark 
-    ? 'bg-white text-[#0A0A0B] border-white' 
-    : 'bg-[#0A0A0B] text-white border-black';
-  const roleInactive = isDark
-    ? 'bg-white/[0.04] text-[#D6D6D3] border-white/10 hover:border-white/25'
-    : 'bg-black/[0.04] text-[#4B4B48] border-black/10 hover:border-black/25';
-
   return (
     <div className={`min-h-screen ${bgMain} ${textMain} relative overflow-hidden flex transition-colors duration-500 ease-in-out`}>
       <style>{`
@@ -79,7 +69,7 @@ const Register = () => {
       <NetworkField isDark={isDark} />
 
       {/* Theme Toggle Button */}
-      <button 
+      <button
         onClick={() => setIsDark(!isDark)}
         className={`absolute top-8 right-8 z-50 p-2 rounded-full ${textMuted} hover:${textMain} active:scale-90 transition-all`}
         aria-label="Toggle Theme"
@@ -102,16 +92,12 @@ const Register = () => {
             <div className={`w-1.5 h-1.5 rounded-full ${dotColor} transition-colors duration-500`} />
             <span className="font-semibold tracking-tight text-[15px]">NetShield AI</span>
           </div>
-          
+
           <h2 className="font-semibold tracking-tight text-[28px] leading-[1.15] mb-4 transition-all duration-300">
-            {role === 'analyst' 
-              ? 'Set up your analyst console.' 
-              : 'Set up your admin workspace.'}
+            Set up your analyst console.
           </h2>
           <p className={`${textMuted} text-[14px] leading-relaxed max-w-sm transition-all duration-300`}>
-            {role === 'analyst'
-              ? 'Create an account to start monitoring live traffic, reviewing anomalies, and responding to threats from a single dashboard.'
-              : 'Create an account to manage team access, configure system-wide security policies, and oversee overall network infrastructure.'}
+            Create an account to start monitoring live traffic, reviewing anomalies, and responding to threats from a single dashboard.
           </p>
         </div>
       </div>
@@ -183,6 +169,7 @@ const Register = () => {
                 <input
                   id="password"
                   type="password"
+                  minLength={12}
                   className={`w-full px-3.5 py-2.5 rounded-lg ${inputBg} ${textMain} border ${inputBorder} focus:outline-none transition-colors duration-300 text-[14px]`}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
@@ -197,6 +184,7 @@ const Register = () => {
                 <input
                   id="confirmPassword"
                   type="password"
+                  minLength={12}
                   className={`w-full px-3.5 py-2.5 rounded-lg ${inputBg} ${textMain} border ${inputBorder} focus:outline-none transition-colors duration-300 text-[14px]`}
                   value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}
@@ -205,25 +193,7 @@ const Register = () => {
               </div>
             </div>
 
-            <div>
-              <label className={`block ${textMain} text-[13px] font-medium mb-2 transition-colors duration-500`}>Role</label>
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  onClick={() => setRole('analyst')}
-                  className={`py-2.5 rounded-lg text-[13px] font-medium border transition-all active:scale-[0.97] ${role === 'analyst' ? roleActive : roleInactive}`}
-                >
-                  Security Analyst
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setRole('administrator')}
-                  className={`py-2.5 rounded-lg text-[13px] font-medium border transition-all active:scale-[0.97] ${role === 'administrator' ? roleActive : roleInactive}`}
-                >
-                  Administrator
-                </button>
-              </div>
-            </div>
+            <p className={`${textMuted} text-[13px]`}>New accounts receive analyst access.</p>
 
             {error && <p className="text-red-500 text-[13px]">{error}</p>}
 
