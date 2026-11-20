@@ -17,7 +17,7 @@ import time
 from sensor_audit import audit
 
 
-def capture(interface, duration, output, executable=None):
+def capture(interface, duration, output, executable=None, progress=None):
     executable = executable or shutil.which('zeek')
     if not executable: raise RuntimeError('Zeek executable is not installed or not on PATH')
     output = Path(output).absolute()
@@ -27,14 +27,21 @@ def capture(interface, duration, output, executable=None):
     started = datetime.now(timezone.utc).isoformat()
     command = [str(executable), '-i', interface, str(policy)]
     stopped = False
+    interrupted = False
     start = time.monotonic()
     with (output / 'zeek.stderr').open('w') as errors, (output / 'zeek.stdout').open('w') as stdout:
         process = subprocess.Popen(command, cwd=output, stdout=stdout, stderr=errors, start_new_session=True)
         try:
+            if progress:
+                progress(f'Capturing on {interface} for {duration:g} seconds; it will stop automatically. Ctrl+C saves a partial report.', flush=True)
             deadline = start + duration
             while process.poll() is None and time.monotonic() < deadline:
                 time.sleep(min(.2, max(0, deadline - time.monotonic())))
             stopped = process.poll() is None
+        except KeyboardInterrupt:
+            interrupted = True
+            stopped = True
+            if progress: progress('Stopping capture and saving the partial report…', flush=True)
         finally:
             if process.poll() is None:
                 os.killpg(process.pid, signal.SIGTERM)
@@ -52,10 +59,13 @@ def capture(interface, duration, output, executable=None):
     complete &= all(value == 0 for value in result['incomplete_line_bytes'].values())
     result['log_scan_complete'] = complete
     result.update(capture_started_at=started, capture_duration_seconds=round(elapsed, 3),
+                  requested_capture_seconds=duration, interrupted=interrupted,
+                  completed_requested_duration=not interrupted,
                   interface=interface, zeek_exit_code=process.returncode,
                   zeek_version=subprocess.run([str(executable), '--version'], capture_output=True, text=True, check=True).stdout.strip())
     result['flow_records_per_second'] = round(result['counts'].get('flow_records', 0) / elapsed, 3)
-    result['scope'] = 'Bounded live Zeek observation; logs flushed at shutdown; zero drops do not establish lossless capture'
+    result['scope'] = ('Interrupted live Zeek observation; requested duration was not completed' if interrupted else
+                       'Bounded live Zeek observation; logs flushed at shutdown; zero drops do not establish lossless capture')
     report = output / 'sensor-report.json'
     report.write_text(json.dumps(result, indent=2) + '\n')
     return report
@@ -69,9 +79,9 @@ def main():
     parser.add_argument('--output', type=Path, required=True, help='New or empty local log directory')
     args = parser.parse_args()
     if not 30 <= args.duration <= 3600: parser.error('duration must be between 30 and 3600 seconds')
-    try: report = capture(args.interface, args.duration, args.output, args.zeek)
+    try: report = capture(args.interface, args.duration, args.output, args.zeek, progress=print)
     except (OSError, RuntimeError, subprocess.SubprocessError) as exc: raise SystemExit(str(exc))
-    print(f'Capture finished. Aggregate report: {report}')
+    print(f'Report saved: {report}')
 
 
 if __name__ == '__main__': main()

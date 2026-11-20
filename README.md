@@ -115,7 +115,7 @@ sudo /opt/homebrew/bin/python3 backend/capture_sensor.py \
   --output /tmp/netshield-live-check
 ```
 
-The tool stops Zeek, waits for final connection records to flush, and writes `sensor-report.json` with aggregate flow/packet counts, capture telemetry, errors, and unread/incomplete-byte counts. It never asks for or stores a password; macOS sudo handles authorization in your terminal. On other installations, substitute the actual Python, Zeek, and interface paths. Ordinary Zeek logs may contain sensitive metadata and stay in the local output directory; the JSON report omits endpoint addresses and packet payloads. No raw PCAP is written.
+The tool displays a capture message, stops automatically, waits for final connection records to flush, and writes `sensor-report.json` with aggregate flow/packet counts, capture telemetry, errors, and unread/incomplete-byte counts. Ctrl+C stops early and saves a partial report marked `interrupted=true` and `completed_requested_duration=false`. Each run needs a new/empty directory; existing logs are preserved. It never asks for or stores a password; macOS sudo handles authorization in your terminal. On other installations, substitute the actual Python, Zeek, and interface paths. Ordinary Zeek logs may contain sensitive metadata and stay in the local output directory; the JSON report omits endpoint addresses and packet payloads. No raw PCAP is written.
 
 To observe an already-running sensor without capture privileges or database credentials:
 
