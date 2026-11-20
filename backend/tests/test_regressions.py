@@ -352,6 +352,28 @@ class Regressions(unittest.TestCase):
         state['last_capture_time'] = (mongodb.utcnow() + timedelta(minutes=1)).isoformat()
         self.assertEqual(broker.snapshot()['live_network']['status'], 'clock_skew')
 
+    def test_shadow_attack_score_never_creates_a_live_incident(self):
+        from test_zeek_reader import line
+        async def exercise():
+            with tempfile.TemporaryDirectory() as directory:
+                path=Path(directory,'conn.log');path.write_text(line('shadow-flow'))
+                configured=replace(traffic.settings,zeek_log=path,sensor_id='shadow-fixture')
+                broker=traffic.TrafficBroker()
+                result={'status':'shadow','candidate_attack':True,'candidate_label':'DDoS','attack_score':1.0,'live_approved':False}
+                with patch.object(traffic,'settings',configured),patch.object(traffic.flow_candidate,'score',return_value=result):
+                    task=asyncio.create_task(broker.collect('live_network'))
+                    async def wait():
+                        while broker.state['live_network']['processed']<1: await asyncio.sleep(.01)
+                    await asyncio.wait_for(wait(),3)
+                    task.cancel();await asyncio.gather(task,return_exceptions=True)
+                record=mongodb.packet_logs.find()[0]
+                self.assertFalse(record['analyzed'])
+                self.assertIsNone(record['is_anomaly'])
+                self.assertEqual(record['packet_features']['ai_classification'],'UNKNOWN')
+                self.assertTrue(record['packet_features']['shadow_detection']['candidate_attack'])
+                self.assertEqual(mongodb.incident_logs.count_documents({}),0)
+        asyncio.run(exercise())
+
     def test_websocket_authenticates_before_subscribing(self):
         class Socket:
             headers = {'origin': 'http://localhost:5173'}

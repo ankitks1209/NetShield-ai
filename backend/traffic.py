@@ -20,6 +20,7 @@ from pipeline import process_detection, unknown_result
 from security import authenticate_token
 from zeek_reader import ZeekLogReader
 from sensor_health import SensorHealth
+from flow_candidate import flow_candidate
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -109,6 +110,7 @@ class TrafficBroker:
                                     **flow, 'sensor_id': settings.sensor_id, 'source_mode': 'live',
                                     'event_id': hashlib.sha256(identity.encode()).hexdigest(),
                                 }
+                                result['shadow_detection'] = await asyncio.to_thread(flow_candidate.score, flow)
                                 await asyncio.to_thread(log_packet_to_db, result)
                                 self.record(dataset, result)
                                 state['last_flow_event_time'] = flow['event_time']

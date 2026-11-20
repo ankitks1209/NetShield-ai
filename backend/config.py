@@ -28,6 +28,8 @@ class Settings:
     replay_interval: float
     sensor_id: str
     zeek_stale_seconds: int
+    flow_model_mode: str = 'disabled'
+    flow_model_dir: Path | None = None
 
 def load_settings():
     secret = required('JWT_SECRET_KEY')
@@ -49,13 +51,20 @@ def load_settings():
     sensor_id = os.getenv('SENSOR_ID', 'local-sensor').strip()
     if not sensor_id or len(sensor_id) > 128:
         raise RuntimeError('SENSOR_ID must contain 1 to 128 characters')
+    flow_model_mode = os.getenv('FLOW_MODEL_MODE', 'disabled')
+    flow_model_dir = os.getenv('FLOW_MODEL_DIR', '').strip()
+    if flow_model_mode not in {'disabled', 'shadow'}:
+        raise RuntimeError('FLOW_MODEL_MODE must be disabled or shadow')
+    if flow_model_mode == 'shadow' and not flow_model_dir:
+        raise RuntimeError('FLOW_MODEL_DIR is required for shadow scoring')
     return Settings(
         required('DATABASE_URL'), os.getenv('MONGO_URL') or required('MONGO_URI'),
         secret, minutes, origins,
         Path(os.getenv('MODEL_DIR', str(BACKEND_DIR))),
         Path(os.getenv('DATA_DIR', str(BACKEND_DIR.parent / 'ml/data/processed'))),
         Path(os.getenv('ZEEK_LOG_PATH', '/var/log/zeek/conn.log')),
-        sources, interval, sensor_id, stale_seconds,
+        sources, interval, sensor_id, stale_seconds, flow_model_mode,
+        Path(flow_model_dir) if flow_model_dir else None,
     )
 
 settings = load_settings()

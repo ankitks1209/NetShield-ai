@@ -34,6 +34,7 @@ from schemas import (
 from security import get_current_user, normalize_role, require_admin
 from traffic import broker, router as traffic_router
 from notifications import notification_worker, webhook_url
+from flow_candidate import flow_candidate
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,7 @@ async def lifespan(app):
     webhook_url()  # Reject insecure notification URLs before starting collectors.
     await asyncio.to_thread(Base.metadata.create_all, bind=engine)
     await asyncio.to_thread(detector.load)
+    await asyncio.to_thread(flow_candidate.load, settings.flow_model_dir, settings.flow_model_mode)
     try:
         await asyncio.to_thread(storage.ensure_indexes)
     except PyMongoError:
@@ -317,6 +319,11 @@ def get_model_telemetry():
                        'status': 'Loaded' if loaded else 'Offline', 'latency': 'Not measured', 'lastUpdated': 'Startup load'})
     return {'status': 'success', 'global_accuracy': 'Not verified', 'active_models_count': len(detector.engines),
             'inference_latency': 'Per-event timing', 'models': models}
+
+@api.get('/models/flow-candidate')
+def get_flow_candidate():
+    return {'status': 'success', **flow_candidate.status(),
+            'evaluation': flow_candidate.report}
 
 @api.get('/users')
 def get_all_users(db: Session = Depends(get_db)):

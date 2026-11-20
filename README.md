@@ -11,7 +11,7 @@ This version repairs the security and ingestion foundation. It does **not** clai
 - **REST inference:** uses the same model input contract and persistent incident service as replay.
 - **Simulations:** marked explicitly, excluded from operational metrics by default, and never sent to webhooks.
 
-Live Zeek records currently carry an **UNKNOWN** verdict. The old four-field/zero-filled CICIDS vector was invalid and has been removed. A tested Zeek-specific feature/model pipeline is required before enabling live classification. Completed Zeek connection logs are flow records, not a per-packet feed: long-lived connections may be logged later than individual packets.
+Live Zeek records currently carry an **UNKNOWN** verdict. The old four-field/zero-filled CICIDS vector was invalid and has been removed. A versioned four-feature candidate is available for explicit shadow observation, but it failed its offline acceptance checks and cannot activate live classification. Completed Zeek connection logs are flow records, not a per-packet feed: long-lived connections may be logged later than individual packets.
 
 ## Requirements and setup
 
@@ -23,8 +23,43 @@ The following files are intentionally excluded from Git:
 - `backend/xgboost_unsw_model.joblib` and `backend/label_encoder1.joblib`
 - `ml/data/processed/cicids2017_clean.csv` and `ml/data/processed/unsw_nb15_clean.csv`
 - Secret environment files, captures, virtual environments, and sensor logs.
+- New `ml/artifacts/*/model.joblib` files. Their aggregate `evaluation.json` reports are tracked.
 
-A fresh clone needs these artifacts before starting the current Compose configuration. A reproducible training/export pipeline remains a separate milestone.
+A fresh clone needs the legacy runtime artifacts before starting the current Compose configuration. Reproducible benchmark/export commands for new candidate artifacts are provided below; they preserve the deployed legacy files.
+
+## Reproducible model experiments
+
+Both source CSV datasets are under `ml/data/raw`. The UNSW original training/testing files remain separate. The legacy `PreprocessData.py` output combines them for replay and must not be used to claim independent evaluation. New training commands read the original files directly.
+
+Run from the repository root, using a **new output directory** for each run:
+
+```bash
+backend/venv/bin/python ml/train_flow_candidate.py --output ml/artifacts/my-flow-run
+backend/venv/bin/python ml/train_csv_benchmarks.py --dataset unsw-nb15 --output ml/artifacts/my-unsw-run
+backend/venv/bin/python ml/train_csv_benchmarks.py --dataset cicids2017 --output ml/artifacts/my-cicids-run
+```
+
+Each run saves a fitted preprocessing/classifier pipeline and an `evaluation.json` with runtime versions, random seed, source/code checksums, feature schema, split provenance, confusion matrices, and per-class support/precision/recall/F1. Identifiers and target columns are excluded from features. Thresholds are selected using training-only validation at a declared 1% false-positive budget; the test set is never used to retune them. The budget may fail on held-out data, which is reported explicitly.
+
+| Experiment | Evaluation scope | Attack recall at selected threshold | False-positive rate | Other result |
+| --- | --- | --- | --- | --- |
+| Four-feature flow candidate | 72,513 supported TCP/UDP/ICMP rows from the official UNSW holdout | 36.38% | 5.75% | All declared offline acceptance checks failed |
+| Full-feature UNSW CSV | All 82,332 official test records | 86.27% | 3.19% | Standard multiclass argmax accuracy: 68.52% |
+| Full-feature CICIDS CSV | 24,773 rows from an internal grouped holdout of a per-class sample | 99.92% | 1.39% | Standard multiclass argmax accuracy: 99.04%; sample-specific |
+
+These results measure different operating rules: binary attack thresholding and multiclass argmax accuracy must not be mixed. The CICIDS experiment retains at most 20,000 uniformly sampled finite rows per class to bound memory and preserve rare classes. Sampling changes class prevalence; its accuracy is not a population or independent day/session estimate. UNSW uses all original training rows for the full-feature experiment, partitioned into grouped fit/validation subsets before official holdout evaluation. Exact feature vectors are kept together within each internal split; novel-feature holdout results are reported separately. This does not rule out broader session or temporal leakage.
+
+The minimal flow contract contains measured duration in seconds, transport, originator packet count, and responder packet count. It deliberately excludes byte-count substitutions, IPs, row IDs, labels, service names, and incompatible connection-state codes. Matching broad field meanings across Argus/UNSW and Zeek does not prove extractor equivalence. Missing values, unsupported transports, and incomplete capture evidence produce abstentions. Current live observations lack independent attack labels, so no live precision/recall is claimed.
+
+For local **shadow-only** observation, set `FLOW_MODEL_MODE=shadow` and `FLOW_MODEL_DIR` to the absolute candidate directory before starting the backend. Defaults remain disabled. For Compose, set `FLOW_MODEL_HOST_DIR` and add `-f compose.flow-model.yml` after the base and Zeek override files. The authenticated `/api/models/flow-candidate` endpoint exposes the loaded candidate's status and evaluation. Checksums, feature contract, and recorded library versions must match before loading the trusted artifact. Shadow scores are stored as nested telemetry and cannot set a live verdict, create an incident, or dispatch a notification. There is no active-production candidate mode.
+
+For a saved Zeek log, run `ml/observe_flow_candidate.py --model-dir <candidate-directory> --conn-log <conn.log> --output <aggregate-report.json>` with the backend Python interpreter. The verified 94-flow live observation produced 93 candidate scores and one abstention for a missing duration. Those flows are unlabeled; the candidate's labels do not establish correctness or live accuracy. Aggregate counts are saved in `ml/artifacts/zeek-flow-v1/shadow-observation.json`, without endpoint addresses or individual flow identifiers.
+
+The newly trained full-feature CSV models are benchmark artifacts only. The existing Random Forest/XGBoost runtime models and Apple-style UI are preserved. New production model selection and live activation require separate validation.
+
+## Branch and pull-request workflow
+
+All upgrades after `pre-improvements-2026-11-01` are on `codex/product-improvements`; `main` retains the pre-upgrade code. Repository instructions in `AGENTS.md` require a feature branch, validation, a checkpoint, and a PR against `main` before integration. New branches use `codex/`. Merge only after review and explicit user direction.
 
 ### Docker deployment
 
