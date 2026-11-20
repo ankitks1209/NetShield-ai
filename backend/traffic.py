@@ -19,6 +19,7 @@ from mongodb import log_packet_to_db, get_sensor_checkpoint, save_sensor_checkpo
 from pipeline import process_detection, unknown_result
 from security import authenticate_token
 from zeek_reader import ZeekLogReader
+from sensor_health import SensorHealth
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -32,22 +33,33 @@ class TrafficBroker:
     def __init__(self):
         self.subscribers = {name: set() for name in (*SOURCES, 'live_network')}
         self.tasks = {}
+        self.health = SensorHealth(settings)
         self.state = {name: {'status': 'disabled', 'processed': 0, 'last_event_at': None} for name in self.subscribers}
 
     def snapshot(self):
         states = {name: dict(state) for name, state in self.state.items()}
         live = states['live_network']
+        if 'live_network' in self.tasks or live['status'] != 'disabled':
+            live['capture_health'] = self.health.snapshot()
         if live.get('last_capture_time') and live['status'] in {'telemetry_only', 'degraded'}:
             age = (datetime.now(timezone.utc) - datetime.fromisoformat(live['last_capture_time'])).total_seconds()
             live['capture_age_seconds'] = round(age, 2)
             if age > settings.zeek_stale_seconds: live['status'] = 'stale'
             if age < -5: live['status'] = 'clock_skew'
+            live['flow_freshness'] = live['status'] if live['status'] in {'stale', 'clock_skew'} else 'current'
+            # Quiet networks can have no completed connections while capture heartbeats remain current.
+            stats = live['capture_health']['logs']['stats']
+            if live['status'] == 'stale' and stats['status'] == 'current':
+                live['status'] = 'telemetry_only'
         return states
 
     async def start(self):
         for dataset in settings.monitoring_datasets:
             if dataset not in self.tasks:
                 self.tasks[dataset] = asyncio.create_task(self.supervise(dataset))
+                if dataset == 'live_network':
+                    for kind in ['stats', 'capture_loss']:
+                        self.tasks[f'health:{kind}'] = asyncio.create_task(self.health.follow(kind))
 
     async def supervise(self, dataset):
         delay = 1
@@ -77,10 +89,11 @@ class TrafficBroker:
         state.update(status='starting', error=None)
         try:
             if dataset == 'live_network':
-                checkpoint_key = f'{settings.sensor_id}:{settings.zeek_log.resolve()}'
+                checkpoint_key = f'{settings.sensor_id}:{settings.zeek_log.absolute()}'
                 saved = await asyncio.to_thread(get_sensor_checkpoint, checkpoint_key)
                 reader = ZeekLogReader(settings.zeek_log, saved)
-                state.update(status='telemetry_only', malformed_lines=0, capture_health='not_measured', sensor_id=settings.sensor_id)
+                state.update(status='telemetry_only', sensor_id=settings.sensor_id)
+                state.setdefault('malformed_lines', 0)
                 try:
                     while True:
                         events = await asyncio.to_thread(reader.poll)

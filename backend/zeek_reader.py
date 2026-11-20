@@ -44,8 +44,10 @@ def number(value, name, integer=False, maximum=None):
 
 
 class ZeekParser:
-    def __init__(self, schema=None):
+    def __init__(self, schema=None, expected_path='conn', normalizer=None):
         self.schema = schema or {'separator': '\t', 'empty': '(empty)', 'unset': '-', 'fields': [], 'types': []}
+        self.expected_path = expected_path
+        self.normalizer = normalizer or normalize
 
     def parse(self, line):
         if line.startswith('#'):
@@ -56,14 +58,14 @@ class ZeekParser:
                 key, values = parts[0], parts[1:]
                 if key == '#path' and values:
                     self.schema['path'] = values[0]
-                    if values[0] != 'conn': raise ZeekParseError('Configured log is not a Zeek connection log')
+                    if values[0] != self.expected_path: raise ZeekParseError(f'Expected a Zeek {self.expected_path} log')
                 if key == '#fields': self.schema['fields'] = values
                 if key == '#types': self.schema['types'] = values
                 if key == '#empty_field' and values: self.schema['empty'] = values[0]
                 if key == '#unset_field' and values: self.schema['unset'] = values[0]
             return None
-        if self.schema.get('path', 'conn') != 'conn':
-            raise ZeekParseError('Configured log is not a Zeek connection log')
+        if self.schema.get('path', self.expected_path) != self.expected_path:
+            raise ZeekParseError(f'Expected a Zeek {self.expected_path} log')
         if line.lstrip().startswith('{'):
             try:
                 record = json.loads(line, parse_constant=lambda _: (_ for _ in ()).throw(ZeekParseError('Nonfinite JSON value')))
@@ -84,13 +86,19 @@ class ZeekParser:
                 elif kind in {'count', 'port', 'int'}:
                     record[key] = number(value, key, integer=True)
                 elif kind in {'time', 'interval', 'double'}:
-                    record[key] = number(value, key)
+                    # pkt_lag can be negative when sensor and packet clocks differ.
+                    if key == 'pkt_lag' and self.expected_path == 'stats':
+                        try: record[key] = float(value)
+                        except ValueError: raise ZeekParseError('Invalid packet lag')
+                        if not math.isfinite(record[key]): raise ZeekParseError('Invalid packet lag')
+                    else:
+                        record[key] = number(value, key)
                 elif kind == 'bool':
                     if value not in {'T', 'F'}: raise ZeekParseError('Invalid boolean field')
                     record[key] = value == 'T'
                 else:
                     record[key] = unescape(value)
-        return normalize(record)
+        return self.normalizer(record)
 
 
 def normalize(record):
@@ -151,17 +159,19 @@ class ReadEvent:
 
 
 class ZeekLogReader:
-    def __init__(self, path, checkpoint=None):
+    def __init__(self, path, checkpoint=None, parser_factory=ZeekParser):
         self.path = Path(path)
         self.checkpoint = checkpoint
         self.handle = None
-        self.parser = ZeekParser()
+        self.parser_factory = parser_factory
+        self.parser = parser_factory()
         self.identity = None
         self.prefix = b''
         self.pending = b''
         self.discarding = False
         self.state = 'waiting_for_log'
         self.anchor = None
+        self.recovery_notice = None
 
     def close(self):
         if self.handle: self.handle.close()
@@ -171,18 +181,38 @@ class ZeekLogReader:
         self.close()
         try:
             self.handle = self.path.open('rb')
+            stat = os.fstat(self.handle.fileno())
         except FileNotFoundError:
+            stat = None
+        saved = self.checkpoint
+        # A restart can happen after Zeek renamed conn.log but before the reader
+        # drained it. Recover the exact old inode when the uncompressed rotation
+        # is still present, then let EOF switch us to the new active file.
+        if saved and (stat is None or tuple(saved.get('identity', ())) != (stat.st_dev, stat.st_ino)):
+            for candidate in self.path.parent.glob(self.path.stem + '*'):
+                if candidate.is_symlink() or not candidate.is_file(): continue
+                try:
+                    older = candidate.open('rb')
+                    old_stat = os.fstat(older.fileno())
+                    if tuple(saved.get('identity', ())) == (old_stat.st_dev, old_stat.st_ino):
+                        if self.handle: self.handle.close()
+                        self.handle, stat = older, old_stat
+                        break
+                    older.close()
+                except FileNotFoundError:
+                    continue
+        if self.handle is None:
             self.state = 'waiting_for_log'
             return False
-        stat = os.fstat(self.handle.fileno())
         self.identity = (stat.st_dev, stat.st_ino)
+        if saved and tuple(saved.get('identity', ())) != self.identity:
+            self.recovery_notice = 'Previous checkpoint file is no longer available; unread rotated records may be missing'
         self.prefix = self.handle.read(128)
         self.handle.seek(0)
         self.pending = b''
         self.discarding = False
-        self.parser = ZeekParser()
+        self.parser = self.parser_factory()
         self.anchor = None
-        saved = self.checkpoint
         if saved and tuple(saved.get('identity', ())) == self.identity and saved.get('offset', 0) <= stat.st_size:
             length = saved.get('prefix_length', 0)
             if length and hashlib.sha256(self.prefix[:length]).hexdigest() == saved.get('prefix_hash'):
@@ -193,7 +223,7 @@ class ZeekLogReader:
                     valid = hashlib.sha256(self.handle.read(anchor['length'])).hexdigest() == anchor['hash']
                 if valid:
                     self.handle.seek(saved['offset'])
-                    self.parser = ZeekParser(saved.get('schema'))
+                    self.parser = self.parser_factory(saved.get('schema'))
                     self.anchor = anchor
                 else:
                     self.handle.seek(0)
@@ -210,6 +240,9 @@ class ZeekLogReader:
     def poll(self, maximum_lines=200):
         if self.handle is None and not self.open(): return []
         events = []
+        if self.recovery_notice:
+            events.append(ReadEvent('error', self.cursor(), error=self.recovery_notice))
+            self.recovery_notice = None
         try:
             stat = self.path.stat()
             if (stat.st_dev, stat.st_ino) == self.identity:

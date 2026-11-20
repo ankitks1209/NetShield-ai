@@ -1,0 +1,38 @@
+{
+  "verified_at": "2026-11-20T07:07:05.449224+00:00",
+  "baseline_commit": "3804a660a03e56d4c75832821a4b28ab3451ce50",
+  "python": "3.14.7",
+  "zeek": "zeek version 8.2.1",
+  "suite": {
+    "tests": 65,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "seconds": 21.112
+  },
+  "offline_zeek_fixture": {
+    "packet_records": 2000,
+    "expected_bidirectional_flows": 1000,
+    "formats": [
+      "JSON",
+      "TSV"
+    ],
+    "health_logs": [
+      "stats",
+      "capture_loss"
+    ]
+  },
+  "sustained_log_fixture": {
+    "flow_records": 2000,
+    "fragmented_writes": true,
+    "rotation": true,
+    "expected_duplicates": 0,
+    "observation_seconds": 3
+  },
+  "live_interface": {
+    "interface_discovered": "en0",
+    "capture_run": false,
+    "reason": "macOS capture device requires administrator authorization; sudo -n reported that a password is required"
+  },
+  "scope": "Real Zeek offline PCAP processing and sustained fixture log ingestion; in-memory database substitutes; live NIC capacity and real database deployment not validated"
+}

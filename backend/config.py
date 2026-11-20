@@ -46,13 +46,16 @@ def load_settings():
         raise RuntimeError('Invalid token lifetime or replay interval')
     if not 1 <= stale_seconds <= 86400:
         raise RuntimeError('ZEEK_STALE_SECONDS must be between 1 and 86400')
+    sensor_id = os.getenv('SENSOR_ID', 'local-sensor').strip()
+    if not sensor_id or len(sensor_id) > 128:
+        raise RuntimeError('SENSOR_ID must contain 1 to 128 characters')
     return Settings(
         required('DATABASE_URL'), os.getenv('MONGO_URL') or required('MONGO_URI'),
         secret, minutes, origins,
         Path(os.getenv('MODEL_DIR', str(BACKEND_DIR))),
         Path(os.getenv('DATA_DIR', str(BACKEND_DIR.parent / 'ml/data/processed'))),
         Path(os.getenv('ZEEK_LOG_PATH', '/var/log/zeek/conn.log')),
-        sources, interval, os.getenv('SENSOR_ID', 'local-sensor'), stale_seconds,
+        sources, interval, sensor_id, stale_seconds,
     )
 
 settings = load_settings()

@@ -92,6 +92,54 @@ class ZeekReaderTests(unittest.TestCase):
                 self.assertEqual([event.flow['uid'] for event in events if event.flow], ['old-tail', 'new-head'])
             finally: reader.close()
 
+    def test_restart_recovers_unread_tail_of_renamed_log(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, 'conn.log'); path.write_text(line('already-saved'))
+            reader = ZeekLogReader(path)
+            saved = reader.poll()[-1].cursor
+            reader.close()
+            with path.open('a') as handle: handle.write(line('not-yet-saved'))
+            path.rename(Path(directory, 'conn.2026-11-20.log'))
+            path.write_text(line('new-file'))
+            resumed = ZeekLogReader(path, saved)
+            try:
+                flows = [event.flow['uid'] for event in resumed.poll() + resumed.poll() if event.flow]
+                self.assertEqual(flows, ['not-yet-saved', 'new-file'])
+            finally: resumed.close()
+
+    def test_restart_can_drain_rotation_before_new_active_file_exists(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, 'conn.log'); path.write_text(line('saved'))
+            reader = ZeekLogReader(path)
+            saved = reader.poll()[-1].cursor
+            reader.close()
+            with path.open('a') as handle: handle.write(line('unread'))
+            path.rename(Path(directory, 'conn.1.log'))
+            resumed = ZeekLogReader(path, saved)
+            try:
+                self.assertEqual([event.flow['uid'] for event in resumed.poll() if event.flow], ['unread'])
+                path.write_text(line('next'))
+                resumed.poll()
+                self.assertEqual([event.flow['uid'] for event in resumed.poll() if event.flow], ['next'])
+            finally: resumed.close()
+
+    def test_deleted_checkpoint_file_reports_possible_gap(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, 'conn.log'); path.write_text(line('old'))
+            reader = ZeekLogReader(path)
+            saved = reader.poll()[-1].cursor
+            reader.close()
+            path.rename(Path(directory, 'temporarily-renamed'))
+            path.write_text(line('new'))
+            Path(directory, 'temporarily-renamed').unlink()
+            resumed = ZeekLogReader(path, saved)
+            try:
+                events = resumed.poll()
+                self.assertEqual(events[0].kind, 'error')
+                self.assertIn('may be missing', events[0].error)
+                self.assertEqual(events[-1].flow['uid'], 'new')
+            finally: resumed.close()
+
     def test_copy_truncate_resets_instead_of_skipping_new_records(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory, 'conn.log'); path.write_text(line('original'))

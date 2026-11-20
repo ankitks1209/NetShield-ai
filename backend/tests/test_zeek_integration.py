@@ -10,6 +10,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from zeek_reader import ZeekLogReader
+from sensor_health import parser_for
 
 
 def checksum(data):
@@ -29,6 +30,46 @@ def udp_frame(source, destination, source_port, destination_port, payload):
 
 @unittest.skipUnless(shutil.which('zeek'), 'Zeek executable is not installed')
 class ActualZeekTests(unittest.TestCase):
+    def test_sensor_policy_produces_parseable_health_logs_for_sustained_capture(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            capture = root / 'sustained.pcap'
+            pairs = 1000
+            with capture.open('wb') as handle:
+                handle.write(struct.pack('<IHHIIII', 0xa1b2c3d4, 2, 4, 0, 0, 65535, 1))
+                for index in range(pairs):
+                    # Distinct bidirectional UDP flows, spanning 100 capture seconds.
+                    for direction in range(2):
+                        endpoints = ('192.0.2.1', '198.51.100.2', 30000 + index, 9999) if not direction else ('198.51.100.2', '192.0.2.1', 9999, 30000 + index)
+                        packet = udp_frame(*endpoints, b'netshield fixture')
+                        microseconds = (index % 10) * 100000 + direction * 1000
+                        handle.write(struct.pack('<IIII', 1700000000 + index // 10, microseconds, len(packet), len(packet)))
+                        handle.write(packet)
+            policy = Path(__file__).resolve().parents[2] / 'sensor/netshield.zeek'
+            for mode in ['json', 'tsv']:
+                output = root / mode; output.mkdir()
+                command = [shutil.which('zeek'), '-r', str(capture), str(policy)]
+                if mode == 'tsv': command += ['-e', 'redef LogAscii::use_json = F;']
+                subprocess.run(command, cwd=output, check=True, capture_output=True, timeout=30)
+                parsed = {}
+                for kind in ['conn', 'stats', 'capture_loss']:
+                    reader = ZeekLogReader(output / f'{kind}.log', parser_factory=parser_for(kind)) if kind != 'conn' else ZeekLogReader(output / 'conn.log')
+                    samples, errors = [], []
+                    try:
+                        while True:
+                            events = reader.poll()
+                            if not events: break
+                            samples.extend(event.flow for event in events if event.kind == 'flow')
+                            errors.extend(event.error for event in events if event.kind == 'error')
+                    finally: reader.close()
+                    self.assertFalse(errors, (kind, errors))
+                    self.assertTrue(samples, kind)
+                    parsed[kind] = samples
+                self.assertEqual(len(parsed['conn']), pairs)
+                self.assertEqual(sum(flow['Fwd Packets'] + flow['Bwd Packets'] for flow in parsed['conn']), pairs * 2)
+                self.assertTrue(all(row['packets_dropped'] is None for row in parsed['stats']))
+                self.assertTrue(all(row['evidence'] == 'insufficient_tcp_acks' for row in parsed['capture_loss']))
+
     def test_generated_capture_has_equivalent_json_and_tsv_flows(self):
         question = b'\x07example\x04test\x00\x00\x01\x00\x01'
         query = struct.pack('!HHHHHH', 1234, 0x0100, 1, 0, 0, 0) + question

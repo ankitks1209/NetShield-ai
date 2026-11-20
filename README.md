@@ -87,7 +87,7 @@ Run Zeek on that sensor, writing to a dedicated log directory. For example, afte
 mkdir -p sensor-logs
 cd sensor-logs
 # Substitute the actual authorized interface.
-sudo zeek -i en0 -e 'redef LogAscii::use_json = T;'
+sudo zeek -i en0 /absolute/path/to/NetShield-ai/sensor/netshield.zeek
 ```
 
 Standard Zeek TSV also works; JSON is not required. Set ZEEK_LOG_DIR to the **absolute directory**, not the individual file, and run:
@@ -99,7 +99,32 @@ docker compose -f docker-compose.yml -f compose.zeek.yml up -d --build
 
 For direct Python execution, set MONITORING_DATASETS=live_network, ZEEK_LOG_PATH to conn.log, and a unique SENSOR_ID. The reader starts at the beginning when there is no valid checkpoint; after restart it resumes from the last persisted complete line. It reads the new file from the beginning after rotation and drains the old descriptor first. Stable sensor/UID/event-time identifiers make replayed writes idempotent.
 
-Check the authenticated /api/network/status response for processed counts, last flow event time, malformed-line count, waiting/unavailable state, stale data, and future-clock detection. ZEEK_STALE_SECONDS defaults to 120; this is a source-freshness threshold, not a measured packet-drop rate. Capture loss is explicitly unmeasured until capture-health telemetry is integrated.
+The supplied sensor policy enables JSON connection logs, `stats.log` every 10 seconds, and TCP-gap estimates in `capture_loss.log`. Both JSON and standard TSV are supported by the reader. The log directory must be readable by the backend runtime user.
+
+Check the authenticated /api/network/status response for processed counts, last flow event time, malformed-line count, waiting/unavailable state, stale data, and future-clock detection. `sources.live_network.capture_health` contains per-peer capture counters and TCP-gap estimates, with separate freshness and error states. `pkts_dropped` is a local capture counter for the latest reporting interval; an absent field remains unmeasured. `percent_lost` is already a percentage, and is an estimate from TCP ACK gaps rather than a local NIC drop counter. An interval without TCP ACKs has insufficient evidence, even if Zeek logs a zero value. These meanings follow the [Zeek statistics schema](https://docs.zeek.org/en/v8.2.1/scripts/policy/misc/stats.zeek.html) and [capture-loss schema](https://docs.zeek.org/en/v8.2.1/scripts/policy/misc/capture-loss.zeek.html).
+
+ZEEK_STALE_SECONDS defaults to 120. Current stats measurements keep a quiet sensor distinguishable from a stalled connection log; old or missing health measurements never imply lossless capture. Measurements and cursors are persisted together for health logs. On restart, the reader can drain an unread renamed log when its original inode is still available in the same directory; compressed/deleted rotations cannot be recovered automatically and produce an explicit possible-gap diagnostic. Keep uncompressed rotations until ingestion has caught up.
+
+### Bounded capture verification
+
+For a local 60-second observation on this Mac's `en0`, use a new/empty directory:
+
+```bash
+sudo /opt/homebrew/bin/python3 backend/capture_sensor.py \
+  --interface en0 --duration 60 --zeek /opt/homebrew/bin/zeek \
+  --output /tmp/netshield-live-check
+```
+
+The tool stops Zeek, waits for final connection records to flush, and writes `sensor-report.json` with aggregate flow/packet counts, capture telemetry, errors, and unread/incomplete-byte counts. It never asks for or stores a password; macOS sudo handles authorization in your terminal. On other installations, substitute the actual Python, Zeek, and interface paths. Ordinary Zeek logs may contain sensitive metadata and stay in the local output directory; the JSON report omits endpoint addresses and packet payloads. No raw PCAP is written.
+
+To observe an already-running sensor without capture privileges or database credentials:
+
+```bash
+python3 backend/sensor_audit.py --log-dir /absolute/path/to/logs \
+  --duration 60 --output /tmp/netshield-sensor-report.json
+```
+
+This defaults to newly appended records; add `--from-start` to include existing history. Keep log ingestion timing separate from actual NIC capture capacity. Offline PCAP tests establish parser/count correctness, not zero packet loss on a live network.
 
 ## Detection and incident behavior
 
@@ -136,7 +161,7 @@ Docker configuration was reviewed statically in this development environment; Do
 
 1. Reproduce training and held-out evaluation, preserve the UNSW official split, remove row identifiers as learning features, export preprocessing with each estimator, and publish per-class recall/F1, confusion matrices, false-positive rates, and artifact/runtime versions.
 2. Train/evaluate against the exact Zeek feature contract before enabling live attack verdicts.
-3. Add sensor packet-drop/health telemetry, retention enforcement, schema migrations, backup/restore verification, least-privilege database provisioning, and shared multi-instance coordination.
+3. Complete live-interface sustained validation, retention enforcement, schema migrations, backup/restore verification, least-privilege database provisioning, and shared multi-instance coordination. Capture health ingestion is implemented; live capture capacity still needs measurement on the intended deployment.
 4. Complete real invitations/MFA and controlled response integrations only with their full backend lifecycle.
 
 The original audit is preserved in PROJECT_REVIEW.md. The pre-improvement recovery point is Git tag `pre-improvements-2026-11-01`.
