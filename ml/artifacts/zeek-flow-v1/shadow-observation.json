@@ -1,0 +1,19 @@
+{
+  "observed_at": "2026-11-20T17:53:01.189119+00:00",
+  "model_version": "ad50329a8c54caa2",
+  "log_sha256": "aae6d189e29ce8972d096d9b7ab8798eddc4acbd5a4f324ed84a2054331ac207",
+  "counts": {
+    "flows": 94,
+    "shadow": 93,
+    "abstained": 1
+  },
+  "candidate_labels": {
+    "Normal": 93
+  },
+  "abstention_reasons": {
+    "duration_seconds must be a measured number": 1
+  },
+  "live_approved": false,
+  "incidents_created": 0,
+  "scope": "Unlabeled shadow observation. Candidate labels are not ground truth, live verdicts, precision, recall, or false-positive measurements."
+}

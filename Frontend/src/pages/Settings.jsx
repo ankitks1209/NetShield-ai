@@ -1,22 +1,22 @@
-import React, { useState, useEffect } from 'react';
-import { useOutletContext } from 'react-router-dom';
+import { apiFetch } from '../services/api';
+import { useState, useEffect } from 'react';
+import { useAuth } from '../context/auth';
 
 const Settings = () => {
-  const outletContext = useOutletContext();
-  const theme = outletContext?.theme || 'dark';
-  
+  const { user } = useAuth();
+
   const [activeTab, setActiveTab] = useState('System');
   const [settings, setSettings] = useState({
-    fastapiUrl: 'http://35.154.0.127:8000/api/v1',
-    retention: '30 Days',
-    interface: 'en0 (MacBook Air Network)',
+    fastapiUrl: window.location.origin + '/api',
+    retention: 'Not configured',
+    interface: 'Not configured',
     promiscuous: true,
     jwtExpiry: 60,
     mfaEnforced: false,
-    baselineSensitivity: 85,
-    autoBan: true,
-    profileName: 'Admin User',
-    profileEmail: 'admin@netshield.com'
+    baselineSensitivity: 0,
+    autoBan: false,
+    profileName: user.full_name,
+    profileEmail: user.email
   });
   const [isSaving, setIsSaving] = useState(false);
   const [saveMessage, setSaveMessage] = useState(null);
@@ -24,11 +24,11 @@ const Settings = () => {
   useEffect(() => {
     const fetchSettings = async () => {
       try {
-        const res = await fetch('http://35.154.0.127:8000/api/system/settings');
+        const res = await apiFetch('/api/system/settings');
         if (res.ok) {
           const data = await res.json();
           if (data.settings) {
-            setSettings(data.settings);
+            setSettings(previous => ({ ...previous, jwtExpiry: data.settings.tokenExpiryMinutes, mfaEnforced: false, autoBan: false }));
           }
         }
       } catch (err) {
@@ -42,7 +42,7 @@ const Settings = () => {
     setIsSaving(true);
     setSaveMessage(null);
     try {
-      const res = await fetch('http://35.154.0.127:8000/api/system/settings', {
+      const res = await apiFetch('/api/system/settings', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(settings)
@@ -50,7 +50,7 @@ const Settings = () => {
       if (res.ok) setSaveMessage('Settings saved successfully.');
       else setSaveMessage('Failed to save settings.');
     } catch (err) {
-      setSaveMessage('Network error. Settings updated locally.');
+      setSaveMessage(err.message);
     } finally {
       setTimeout(() => { setIsSaving(false); setSaveMessage(null); }, 3000);
     }
@@ -65,23 +65,23 @@ const Settings = () => {
 
   return (
     <div className="space-y-6 max-w-5xl transition-colors duration-500 pb-12">
-      
+
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end gap-4">
         <div>
           <h2 className={`text-[24px] font-semibold tracking-tight ${textPrimary}`}>System Settings</h2>
-          <p className={`text-[13px] ${textMuted} mt-0.5`}>Manage platform configurations, security policies, and AI engine parameters</p>
+          <p className={`text-[13px] ${textMuted} mt-0.5`}>View configuration. Changes are managed by your deployment administrator.</p>
         </div>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-4 gap-8">
-        
+
         <div className="col-span-1 flex flex-row md:flex-col overflow-x-auto md:overflow-x-visible space-x-2 md:space-x-0 md:space-y-1 pb-2 md:pb-0 hide-scrollbar">
           {['System', 'Security & AI', 'Account'].map((tab) => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
               className={`whitespace-nowrap md:w-full text-left px-4 py-2.5 md:py-3 rounded-xl text-[13px] font-semibold transition-all ${
-                activeTab === tab 
+                activeTab === tab
                   ? 'bg-black/[0.06] dark:bg-white/[0.08] text-black dark:text-white shadow-sm'
                   : `${textMuted} hover:text-[#1D1D1F] dark:hover:text-[#F2F2F0] hover:bg-black/[0.04] dark:hover:bg-white/[0.04]`
               }`}
@@ -92,7 +92,7 @@ const Settings = () => {
         </div>
 
         <div className={`col-span-1 md:col-span-3 ${cardMaterial} p-6 sm:p-8 min-h-[500px] flex flex-col justify-between`}>
-          
+
           <div>
             {activeTab === 'System' && (
               <div className="space-y-8">
@@ -101,8 +101,8 @@ const Settings = () => {
                   <div className="space-y-5">
                     <div>
                       <label className={`block text-[12px] font-medium uppercase tracking-wide ${textMuted} mb-2`}>FastAPI Base URL</label>
-                      <input 
-                        type="text" 
+                      <input disabled
+                        type="text"
                         value={settings.fastapiUrl}
                         onChange={(e) => setSettings({...settings, fastapiUrl: e.target.value})}
                         className={`${inputStyle} font-mono`}
@@ -110,11 +110,12 @@ const Settings = () => {
                     </div>
                     <div>
                       <label className={`block text-[12px] font-medium uppercase tracking-wide ${textMuted} mb-2`}>Database Retention Policy</label>
-                      <select 
+                      <select disabled
                         value={settings.retention}
                         onChange={(e) => setSettings({...settings, retention: e.target.value})}
                         className={inputStyle}
                       >
+                        <option>Not configured</option>
                         <option>30 Days</option>
                         <option>60 Days</option>
                         <option>90 Days</option>
@@ -129,11 +130,12 @@ const Settings = () => {
                   <div className="space-y-5">
                     <div>
                       <label className={`block text-[12px] font-medium uppercase tracking-wide ${textMuted} mb-2`}>Primary Capture Interface</label>
-                      <select 
+                      <select disabled
                         value={settings.interface}
                         onChange={(e) => setSettings({...settings, interface: e.target.value})}
                         className={`${inputStyle} font-mono`}
                       >
+                        <option>Not configured</option>
                         <option>eth0 (192.168.1.0/24)</option>
                         <option>wlan0 (10.0.0.0/16)</option>
                         <option>docker0 (172.17.0.0/16)</option>
@@ -144,11 +146,11 @@ const Settings = () => {
                         <div className={`text-[14px] font-semibold ${textPrimary}`}>Promiscuous Mode</div>
                         <div className={`text-[12px] ${textMuted} mt-0.5 leading-relaxed`}>Capture all traffic on the network segment</div>
                       </div>
-                      <input 
-                        type="checkbox" 
+                      <input disabled
+                        type="checkbox"
                         checked={settings.promiscuous}
                         onChange={(e) => setSettings({...settings, promiscuous: e.target.checked})}
-                        className="w-5 h-5 flex-shrink-0 accent-emerald-500 cursor-pointer" 
+                        className="w-5 h-5 flex-shrink-0 accent-emerald-500 cursor-pointer"
                       />
                     </div>
                   </div>
@@ -163,8 +165,8 @@ const Settings = () => {
                   <div className="space-y-5">
                     <div>
                       <label className={`block text-[12px] font-medium uppercase tracking-wide ${textMuted} mb-2`}>JWT Token Expiry (Minutes)</label>
-                      <input 
-                        type="number" 
+                      <input disabled
+                        type="number"
                         value={settings.jwtExpiry}
                         onChange={(e) => setSettings({...settings, jwtExpiry: parseInt(e.target.value) || 0})}
                         className={inputStyle}
@@ -172,14 +174,14 @@ const Settings = () => {
                     </div>
                     <div className={toggleCardStyle}>
                       <div className="pr-4">
-                        <div className={`text-[14px] font-semibold ${textPrimary}`}>Enforce 2FA Globally</div>
+                        <div className={`text-[14px] font-semibold ${textPrimary}`}>2FA (Unavailable)</div>
                         <div className={`text-[12px] ${textMuted} mt-0.5 leading-relaxed`}>Require all analysts and admins to use MFA</div>
                       </div>
-                      <input 
-                        type="checkbox" 
+                      <input disabled
+                        type="checkbox"
                         checked={settings.mfaEnforced}
                         onChange={(e) => setSettings({...settings, mfaEnforced: e.target.checked})}
-                        className="w-5 h-5 flex-shrink-0 accent-emerald-500 cursor-pointer" 
+                        className="w-5 h-5 flex-shrink-0 accent-emerald-500 cursor-pointer"
                       />
                     </div>
                   </div>
@@ -190,26 +192,26 @@ const Settings = () => {
                   <div className="space-y-6">
                     <div>
                       <div className="flex justify-between mb-2">
-                        <label className={`text-[12px] font-medium uppercase tracking-wide ${textMuted}`}>Baseline Sensitivity</label>
-                        <span className="text-[12px] font-bold text-emerald-500">{settings.baselineSensitivity}%</span>
+                        <label className={`text-[12px] font-medium uppercase tracking-wide ${textMuted}`}>Sensitivity Tuning (Unavailable)</label>
+                        <span className="text-[12px] font-bold text-emerald-500">Unavailable</span>
                       </div>
-                      <input 
-                        type="range" min="1" max="100" 
+                      <input disabled
+                        type="range" min="1" max="100"
                         value={settings.baselineSensitivity}
                         onChange={(e) => setSettings({...settings, baselineSensitivity: parseInt(e.target.value)})}
-                        className="w-full h-1.5 bg-gray-200 dark:bg-white/20 rounded-lg appearance-none cursor-pointer accent-emerald-500" 
+                        className="w-full h-1.5 bg-gray-200 dark:bg-white/20 rounded-lg appearance-none cursor-pointer accent-emerald-500"
                       />
                     </div>
                     <div className={toggleCardStyle}>
                       <div className="pr-4">
-                        <div className={`text-[14px] font-semibold ${textPrimary}`}>Auto-Ban Malicious IPs</div>
+                        <div className={`text-[14px] font-semibold ${textPrimary}`}>Automatic Firewall Response (Unavailable)</div>
                         <div className={`text-[12px] ${textMuted} mt-0.5 leading-relaxed`}>Automatically update firewall rules for severe threats</div>
                       </div>
-                      <input 
-                        type="checkbox" 
+                      <input disabled
+                        type="checkbox"
                         checked={settings.autoBan}
                         onChange={(e) => setSettings({...settings, autoBan: e.target.checked})}
-                        className="w-5 h-5 flex-shrink-0 accent-emerald-500 cursor-pointer" 
+                        className="w-5 h-5 flex-shrink-0 accent-emerald-500 cursor-pointer"
                       />
                     </div>
                   </div>
@@ -225,8 +227,8 @@ const Settings = () => {
                     <div className="flex flex-col sm:flex-row gap-4 sm:gap-5">
                       <div className="flex-1">
                         <label className={`block text-[12px] font-medium uppercase tracking-wide ${textMuted} mb-2`}>Full Name</label>
-                        <input 
-                          type="text" 
+                        <input disabled
+                          type="text"
                           value={settings.profileName}
                           onChange={(e) => setSettings({...settings, profileName: e.target.value})}
                           className={inputStyle}
@@ -235,8 +237,8 @@ const Settings = () => {
                     </div>
                     <div>
                       <label className={`block text-[12px] font-medium uppercase tracking-wide ${textMuted} mb-2`}>Email Address</label>
-                      <input 
-                        type="email" 
+                      <input disabled
+                        type="email"
                         value={settings.profileEmail}
                         onChange={(e) => setSettings({...settings, profileEmail: e.target.value})}
                         className={inputStyle}
@@ -252,15 +254,15 @@ const Settings = () => {
             <span className={`text-[13px] font-medium ${saveMessage?.includes('success') ? 'text-emerald-600 dark:text-emerald-500' : 'text-red-600 dark:text-red-500'}`}>
               {saveMessage}
             </span>
-            <button 
+            <button
               onClick={handleSave}
-              disabled={isSaving}
+              disabled={true} title="Runtime configuration changes are unavailable"
               className="w-full sm:w-auto px-6 py-2.5 text-[13px] font-semibold rounded-lg transition-colors active:scale-95 shadow-sm bg-black dark:bg-white text-white dark:text-black hover:bg-gray-800 dark:hover:bg-gray-200 disabled:opacity-50"
             >
-              {isSaving ? 'Applying...' : 'Save Configuration'}
+              {isSaving ? 'Applying...' : 'Configuration is read-only'}
             </button>
           </div>
-          
+
         </div>
       </div>
     </div>

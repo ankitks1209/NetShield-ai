@@ -1,133 +1,203 @@
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-import pandas as pd
+"""One collector per configured source, independent of browser subscriptions.
+
+Run a single API worker until a shared broker/worker service is introduced.
+"""
 import asyncio
-import os
-import math
-import joblib
+from contextlib import suppress
+from datetime import datetime, timezone
+import hashlib
 import json
-from mongodb import log_packet_to_db 
-import warnings
-warnings.filterwarnings("ignore", message="X does not have valid feature names")
+import logging
 
+import pandas as pd
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+
+from config import settings
+from database import SessionLocal
+from detection import detector, InvalidFeatures, ModelUnavailable
+from mongodb import log_packet_to_db, get_sensor_checkpoint, save_sensor_checkpoint
+from pipeline import process_detection, unknown_result
+from security import authenticate_token
+from zeek_reader import ZeekLogReader
+from sensor_health import SensorHealth
+from flow_candidate import flow_candidate
+
+logger = logging.getLogger(__name__)
 router = APIRouter()
+SOURCES = {'cicids2017': 'cicids2017_clean.csv', 'unsw-nb15': 'unsw_nb15_clean.csv'}
 
-print("Initializing Live Stream AI Engines...")
-try:
-    rf_model = joblib.load("rf_model_optimized.joblib")
-    encoder_cicids = joblib.load("label_encoder.joblib")
-    print("Stream Engine 1 Ready: Random Forest (CICIDS2017)")
-except Exception as e:
-    rf_model, encoder_cicids = None, None
-    print(f"Warning: Stream Engine 1 failed: {e}")
+def check_socket_token(token):
+    with SessionLocal() as db:
+        authenticate_token(token, db)
 
-try:
-    xgb_model = joblib.load("xgboost_unsw_model.joblib")
-    encoder_unsw = joblib.load("label_encoder1.joblib")
-    print("Stream Engine 2 Ready: XGBoost (UNSW-NB15)")
-except Exception as e:
-    xgb_model, encoder_unsw = None, None
-    print(f"Warning: Stream Engine 2 failed: {e}")
+class TrafficBroker:
+    def __init__(self):
+        self.subscribers = {name: set() for name in (*SOURCES, 'live_network')}
+        self.tasks = {}
+        self.health = SensorHealth(settings)
+        self.state = {name: {'status': 'disabled', 'processed': 0, 'last_event_at': None} for name in self.subscribers}
 
-DATASETS = {
-    "cicids2017": "/ml/data/processed/cicids2017_clean.csv",
-    "unsw-nb15": "/ml/data/processed/unsw_nb15_clean.csv"
-}
+    def snapshot(self):
+        states = {name: dict(state) for name, state in self.state.items()}
+        live = states['live_network']
+        if 'live_network' in self.tasks or live['status'] != 'disabled':
+            live['capture_health'] = self.health.snapshot()
+        if live.get('last_capture_time') and live['status'] in {'telemetry_only', 'degraded'}:
+            age = (datetime.now(timezone.utc) - datetime.fromisoformat(live['last_capture_time'])).total_seconds()
+            live['capture_age_seconds'] = round(age, 2)
+            if age > settings.zeek_stale_seconds: live['status'] = 'stale'
+            if age < -5: live['status'] = 'clock_skew'
+            live['flow_freshness'] = live['status'] if live['status'] in {'stale', 'clock_skew'} else 'current'
+            # Quiet networks can have no completed connections while capture heartbeats remain current.
+            stats = live['capture_health']['logs']['stats']
+            if live['status'] == 'stale' and stats['status'] == 'current':
+                live['status'] = 'telemetry_only'
+        return states
 
-def clean_packet_data(row_dict):
-    clean_dict = {}
-    for k, v in row_dict.items():
-        if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
-            clean_dict[k] = 0.0
-        else:
-            clean_dict[k] = v
-    return clean_dict
+    async def start(self):
+        for dataset in settings.monitoring_datasets:
+            if dataset not in self.tasks:
+                self.tasks[dataset] = asyncio.create_task(self.supervise(dataset))
+                if dataset == 'live_network':
+                    for kind in ['stats', 'capture_loss']:
+                        self.tasks[f'health:{kind}'] = asyncio.create_task(self.health.follow(kind))
 
-async def tail_zeek_log(filepath):
-    with open(filepath, "r") as file:
-        file.seek(0, os.SEEK_END)
+    async def supervise(self, dataset):
+        delay = 1
         while True:
-            line = file.readline()
-            if not line:
-                await asyncio.sleep(0.1)
-                continue
-            yield line
+            await self.collect(dataset)
+            if self.state[dataset]['status'] != 'unavailable':
+                return  # A finite replay completed; never silently replay the dataset forever.
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 30)
 
-@router.websocket("/ws/traffic/stream")
-async def traffic_stream(websocket: WebSocket, dataset: str = "cicids2017"):
-    await websocket.accept()
-    
-    if dataset == "live_network":
-        zeek_log_path = "/var/log/zeek/conn.log"
-        if not os.path.exists(zeek_log_path):
-            await websocket.send_json({"error": "Zeek conn.log not found."})
-            await websocket.close()
-            return
-            
+    async def stop(self):
+        for task in self.tasks.values(): task.cancel()
+        await asyncio.gather(*self.tasks.values(), return_exceptions=True)
+        self.tasks.clear()
+
+    def publish(self, dataset, payload):
+        for queue in tuple(self.subscribers[dataset]):
+            if queue.full():
+                # Tell a slow viewer to reload durable state instead of silently losing incidents.
+                while not queue.empty(): queue.get_nowait()
+                queue.put_nowait({'type': 'resync_required', 'active_dataset': dataset})
+            else:
+                queue.put_nowait(payload)
+
+    async def collect(self, dataset):
+        state = self.state[dataset]
+        state.update(status='starting', error=None)
         try:
-            async for line in tail_zeek_log(zeek_log_path):
+            if dataset == 'live_network':
+                checkpoint_key = f'{settings.sensor_id}:{settings.zeek_log.absolute()}'
+                saved = await asyncio.to_thread(get_sensor_checkpoint, checkpoint_key)
+                reader = ZeekLogReader(settings.zeek_log, saved)
+                state.update(status='telemetry_only', sensor_id=settings.sensor_id)
+                state.setdefault('malformed_lines', 0)
                 try:
-                    flow_data = json.loads(line)
-                    features = [
-                        float(flow_data.get("id.resp_p", 0)), 
-                        float(flow_data.get("duration", 0.0)), 
-                        float(flow_data.get("orig_bytes", 0)), 
-                        float(flow_data.get("resp_bytes", 0))
-                    ] + [0.0] * 74
-                    
-                    if rf_model and encoder_cicids:
-                        threat_label = encoder_cicids.inverse_transform(rf_model.predict(pd.DataFrame([features])))[0]
-                    else:
-                        threat_label = "MODEL_OFFLINE"
-                        
-                    packet_data = {
-                        "active_dataset": "live_network", "Source IP": flow_data.get("id.orig_h", "0.0.0.0"),
-                        "Destination IP": flow_data.get("id.resp_h", "0.0.0.0"), "Destination Port": flow_data.get("id.resp_p", 0),
-                        "Protocol": str(flow_data.get("proto", "unknown")).upper(), "Flow Duration": flow_data.get("duration", 0.0),
-                        "Fwd Bytes": flow_data.get("orig_bytes", 0), "Bwd Bytes": flow_data.get("resp_bytes", 0),
-                        "ai_classification": threat_label, "is_anomaly": threat_label not in ["BENIGN", "MODEL_OFFLINE"]
-                    }
-                    log_packet_to_db(packet_data)
-                    await websocket.send_json(packet_data)
-                    await asyncio.sleep(0.2)
-                except json.JSONDecodeError: continue
-        except WebSocketDisconnect: pass
-        return
+                    while True:
+                        events = await asyncio.to_thread(reader.poll)
+                        for event in events:
+                            if event.kind == 'error':
+                                state['malformed_lines'] += 1
+                                state['last_parse_error'] = event.error
+                            elif event.kind == 'flow':
+                                flow = event.flow
+                                identity = f"{settings.sensor_id}:{flow['uid']}:{flow['event_time']}"
+                                result = {
+                                    **unknown_result(dataset, 'Live classification needs a validated feature adapter'),
+                                    **flow, 'sensor_id': settings.sensor_id, 'source_mode': 'live',
+                                    'event_id': hashlib.sha256(identity.encode()).hexdigest(),
+                                }
+                                result['shadow_detection'] = await asyncio.to_thread(flow_candidate.score, flow)
+                                await asyncio.to_thread(log_packet_to_db, result)
+                                self.record(dataset, result)
+                                state['last_flow_event_time'] = flow['event_time']
+                                state['last_capture_time'] = flow['flow_ended_at'] or flow['event_time']
+                            # Do not checkpoint a flow until its durable write succeeds.
+                            await asyncio.to_thread(save_sensor_checkpoint, checkpoint_key, event.cursor)
+                        state['status'] = ('degraded' if state['malformed_lines'] else 'telemetry_only') if reader.state == 'following' else 'waiting_for_log'
+                        if not events: await asyncio.sleep(0.2)
+                finally:
+                    reader.close()
+                return
 
-    csv_path = DATASETS.get(dataset.lower(), DATASETS["cicids2017"])
-    if not os.path.exists(csv_path):
-        await websocket.close()
-        return
+            path = settings.data_dir / SOURCES[dataset]
+            stat = path.stat()
+            model = detector.engines.get(dataset)
+            source_version = f'{dataset}:{stat.st_size}:{stat.st_mtime_ns}:{model.version if model else "offline"}'
+            # Chunk loading and model/database work stay outside the event loop.
+            reader = pd.read_csv(path, chunksize=200)
+            row_index = 0
+            try:
+                while True:
+                    chunk = await asyncio.to_thread(next, reader, None)
+                    if chunk is None: break
+                    for _, row in chunk.iterrows():
+                        raw = {key.strip(): value for key, value in row.to_dict().items()}
+                        features = {key: value for key, value in raw.items() if key not in {'Label', 'label', 'attack_cat'}}
+                        event_id = hashlib.sha256(f'{source_version}:{row_index}'.encode()).hexdigest()
+                        try:
+                            result = await asyncio.to_thread(process_detection, dataset, features, 'Replay dataset', event_id, 'replay')
+                        except (InvalidFeatures, ModelUnavailable) as exc:
+                            result = {**unknown_result(dataset, exc), 'event_id': event_id, 'dataset_used': dataset}
+                            await asyncio.to_thread(log_packet_to_db, result)
+                        result.update(active_dataset=dataset, Protocol=str(raw.get('proto', 'UNKNOWN')).upper())
+                        self.record(dataset, result)
+                        row_index += 1
+                        await asyncio.sleep(settings.replay_interval)
+            finally:
+                reader.close()
+            state['status'] = 'completed'
+        except asyncio.CancelledError:
+            state['status'] = 'stopped'
+            raise
+        except Exception:
+            logger.exception('Collector stopped: %s', dataset)
+            state.update(status='unavailable', error='Source or persistence unavailable; check service logs')
+        finally:
+            self.publish(dataset, {'type': 'source_status', 'active_dataset': dataset, **state})
 
+    def record(self, dataset, result):
+        state = self.state[dataset]
+        state['processed'] += 1
+        state['last_event_at'] = datetime.now(timezone.utc).isoformat()
+        state['status'] = 'telemetry_only' if dataset == 'live_network' else ('degraded' if result['analysis_status'] != 'analyzed' else 'running')
+        self.publish(dataset, {'type': 'packet', **result})
+
+broker = TrafficBroker()
+
+@router.websocket('/ws/traffic/stream')
+async def traffic_stream(websocket: WebSocket, dataset: str = 'cicids2017'):
+    if websocket.headers.get('origin') not in settings.origins or dataset not in broker.subscribers:
+        await websocket.close(code=1008)
+        return
+    await websocket.accept()
+    queue = asyncio.Queue(maxsize=256)
+    subscribed = False
     try:
+        # Browsers cannot set an Authorization header on WebSocket handshakes.
+        # Authenticate in the first frame, before subscribing or disclosing data.
+        message = await asyncio.wait_for(websocket.receive_json(), timeout=5)
+        if not isinstance(message, dict) or message.get('type') != 'authenticate':
+            raise HTTPException(401, 'Authentication required')
+        token = message.get('token')
+        await asyncio.to_thread(check_socket_token, token)
+        broker.subscribers[dataset].add(queue)
+        subscribed = True
+        await websocket.send_json({'type': 'source_status', 'active_dataset': dataset, **broker.snapshot()[dataset]})
         while True:
-            # Read 200 rows at a time to use almost zero RAM
-            for chunk in pd.read_csv(csv_path, chunksize=200):
-                chunk = chunk.fillna(0)
-                for index, row in chunk.iterrows():
-                    raw_packet = json.loads(row.to_json())
-                    raw_packet["active_dataset"] = dataset               
-                packet_data = clean_packet_data(raw_packet)
-                
-                try:
-                    predict_row = row.copy()
-                    if 'Label' in predict_row: predict_row = predict_row.drop('Label')
-                    input_df = pd.DataFrame([predict_row])
-                    
-                    if "unsw" in dataset.lower() and xgb_model:
-                        threat_label = encoder_unsw.inverse_transform(xgb_model.predict(input_df))[0]
-                    elif rf_model:
-                        threat_label = encoder_cicids.inverse_transform(rf_model.predict(input_df))[0]
-                    else:
-                        threat_label = "MODEL_OFFLINE"
-                        
-                    packet_data["ai_classification"] = str(threat_label)
-                    packet_data["is_anomaly"] = str(threat_label).upper() not in ["BENIGN", "NORMAL", "MODEL_OFFLINE"]
-                except Exception as e:
-                    # By the King's Decree: Fail gracefully without sending 'ERROR' to the UI
-                    packet_data["ai_classification"] = "BENIGN"
-                    packet_data["is_anomaly"] = False
-                
-                log_packet_to_db(packet_data)
-                await websocket.send_json(packet_data)
-                await asyncio.sleep(1)
-    except WebSocketDisconnect: pass
+            await asyncio.to_thread(check_socket_token, token)
+            try:
+                payload = await asyncio.wait_for(queue.get(), timeout=10)
+            except asyncio.TimeoutError:
+                payload = {'type': 'source_status', 'active_dataset': dataset, **broker.snapshot()[dataset]}
+            await websocket.send_json(payload)
+    except (HTTPException, asyncio.TimeoutError, ValueError, TypeError, KeyError):
+        with suppress(RuntimeError):
+            await websocket.close(code=1008)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        if subscribed: broker.subscribers[dataset].discard(queue)

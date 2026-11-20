@@ -1,0 +1,16 @@
+# Use with docker compose -f docker-compose.yml -f compose.zeek.yml up -d --build
+# Mount the directory so renamed/rotated conn.log files remain discoverable.
+services:
+  backend:
+    environment:
+      MONITORING_DATASETS: live_network
+      ZEEK_LOG_PATH: /var/log/zeek/conn.log
+      SENSOR_ID: ${SENSOR_ID:-local-sensor}
+      ZEEK_STALE_SECONDS: ${ZEEK_STALE_SECONDS:-120}
+    volumes:
+      - type: bind
+        source: ${ZEEK_LOG_DIR:?Set ZEEK_LOG_DIR to the Zeek output directory}
+        target: /var/log/zeek
+        read_only: true
+        bind:
+          create_host_path: false

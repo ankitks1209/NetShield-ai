@@ -1,0 +1,49 @@
+{
+  "source_commit": "30ae3917e3769364f78bf43b24c62860e609c0bf",
+  "capture_started_at": "2026-11-20T08:18:20.561624+00:00",
+  "capture_duration_seconds": 60.136,
+  "interface": "en0",
+  "zeek_version": "/opt/homebrew/bin/zeek version 8.2.1",
+  "checks": {
+    "completed_sixty_seconds": true,
+    "clean_zeek_exit": true,
+    "raw_flow_count_matches_report": true,
+    "no_duplicate_connection_records": true,
+    "flow_packet_totals_match_report": true,
+    "stats_processed_matches_shutdown": true,
+    "stats_drops_match_shutdown": true,
+    "no_zeek_unprocessed_packets": true,
+    "no_tcp_gaps_reported": true,
+    "all_log_bytes_read": true,
+    "no_parser_errors": true
+  },
+  "observations": {
+    "packets_processed": 1875,
+    "connection_flow_records": 94,
+    "packets_assigned_to_connection_records": 1871,
+    "processed_packets_without_conn_attribution": 4,
+    "protocols": {
+      "TCP": 53,
+      "UDP": 41
+    },
+    "local_capture_drops": 0,
+    "unprocessed_packets": 0,
+    "tcp_ack_samples": 164,
+    "tcp_gap_events": 0,
+    "stats_measurements": 6,
+    "capture_loss_measurements": 3
+  },
+  "evidence_sha256": {
+    "sensor-report.json": "c90a630e0c946f776c44674450763168e6e1bd58ed71ef7010d880876c76c102",
+    "zeek.stderr": "c496065f48d89e94198605a137c349847cffe84e5b915235f4352b009347bbe6",
+    "conn.log": "aae6d189e29ce8972d096d9b7ab8798eddc4acbd5a4f324ed84a2054331ac207",
+    "stats.log": "510d20158a73df4df257fcf979db1ba574d4f902eb8973c02d7f4d479cfb1a56",
+    "capture_loss.log": "dec441c84c0a7bb4b0f1623e8035967d167ee07eda6fc1f3f1bbc62021f91732"
+  },
+  "limitations": [
+    "One 60-second local-interface observation; not sustained high-load capacity or network-wide losslessness.",
+    "Connection counters account for 1871 of 1875 processed packets. These logs do not establish which four packets lacked connection attribution; this difference is not evidence of capture loss.",
+    "Live model classification, concurrent production load, and real database deployment were not exercised."
+  ],
+  "verified_at": "2026-11-20T09:26:01.255861+00:00"
+}

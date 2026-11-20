@@ -1,47 +1,64 @@
+"""Authenticated simulation benchmark. Error responses never count as fast inference."""
+import argparse
+from getpass import getpass
+import json
+import math
+import os
+from pathlib import Path
+import statistics
 import time
-import requests
-import numpy as np
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
-BASE_URL = "http://localhost:8000"
+def request_json(base, path, payload, token=None):
+    headers = {'Content-Type': 'application/json'}
+    if token: headers['Authorization'] = f'Bearer {token}'
+    request = Request(base.rstrip('/') + path, data=json.dumps(payload).encode(), headers=headers)
+    try:
+        with urlopen(request, timeout=15) as response:
+            return json.load(response)
+    except HTTPError as exc:
+        raise SystemExit(f'API rejected the request (HTTP {exc.code}); no benchmark reported')
+    except URLError:
+        raise SystemExit('API unavailable; no benchmark reported')
 
-def run_performance_audit():
-    print("==================================================")
-    print("      NETSHIELD AI - MILESTONE 4 AUDIT SUITE      ")
-    print("==================================================")
+def percentile(values, fraction):
+    return sorted(values)[max(0, math.ceil(len(values) * fraction) - 1)]
 
-    # 1. System Latency & Dashboard Response Time
-    endpoints = [
-        ("Dashboard Trends", "/api/alerts/trends", "GET", None),
-        ("Threat Context", "/api/alerts/context/192.168.1.105", "GET", None),
-        ("Analyst Directory", "/api/users", "GET", None),
-        ("Threat Report Export", "/api/alerts/export", "GET", None)
-    ]
-    
-    latencies = []
-    for name, path, method, payload in endpoints:
-        t0 = time.perf_counter()
-        try:
-            res = requests.get(f"{BASE_URL}{path}", timeout=2) if method == "GET" else requests.post(f"{BASE_URL}{path}", json=payload, timeout=2)
-            ms = (time.perf_counter() - t0) * 1000
-            latencies.append(ms)
-            status = "PASS" if res.status_code == 200 and ms < 100 else "WARN"
-            print(f"[{status}] {name:25} | Latency: {ms:6.2f} ms | Code: {res.status_code}")
-        except Exception as e:
-            print(f"[FAIL] {name:25} | Error: {str(e)}")
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--base-url', default='http://127.0.0.1:8000')
+    parser.add_argument('--sample', type=Path, required=True, help='JSON with dataset, features, and expected_prediction')
+    parser.add_argument('--samples', type=int, default=50)
+    parser.add_argument('--email', help='Login email, unless NETSHIELD_BENCHMARK_TOKEN is set')
+    args = parser.parse_args()
+    if not 1 <= args.samples <= 1000: parser.error('--samples must be between 1 and 1000')
+    sample = json.loads(args.sample.read_text())
+    expected = sample.get('expected_prediction')
+    if not isinstance(expected, str) or not expected: parser.error('Sample must include an expected_prediction label')
+    token = os.getenv('NETSHIELD_BENCHMARK_TOKEN')
+    if not token:
+        if not args.email: parser.error('Provide --email or NETSHIELD_BENCHMARK_TOKEN')
+        token = request_json(args.base_url, '/api/auth/login', {'email': args.email, 'password': getpass('Password: ')})['access_token']
+    elapsed, inference = [], []
+    for _ in range(args.samples):
+        start = time.perf_counter()
+        result = request_json(args.base_url, '/api/predict-manual', {
+            'dataset': sample.get('dataset', 'cicids2017'), 'features': sample['features'], 'force_attack': False,
+        }, token)
+        duration = (time.perf_counter() - start) * 1000
+        if result.get('analysis_status') != 'analyzed' or result.get('prediction') != expected:
+            raise SystemExit('Prediction did not match the control sample; no benchmark reported')
+        value = result.get('inference_ms')
+        if not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise SystemExit('Missing measured inference time; no benchmark reported')
+        elapsed.append(duration); inference.append(value)
+    print(json.dumps({
+        'samples': len(elapsed), 'mode': 'simulation; persisted separately from operational incidents',
+        'round_trip_ms': {'p50': statistics.median(elapsed), 'p95': percentile(elapsed, .95), 'p99': percentile(elapsed, .99)},
+        'model_inference_ms': {'p50': statistics.median(inference), 'p95': percentile(inference, .95)},
+        'scope': 'Single-client control-sample timing; not accuracy, packet-loss, or concurrent-capacity validation',
+    }, indent=2))
 
-    avg_resp = np.mean(latencies) if latencies else 0
-    print(f"\n>> Average Dashboard Response Time: {avg_resp:.2f} ms (Target: < 50 ms)")
-
-    # 2. ML Inference & Alert Latency
-    sample_packet = {"features": [0.05, 512, 12, 0, 1, 0, 80, 443, 0, 0.01]}
-    inference_times = []
-    for _ in range(50):
-        t0 = time.perf_counter()
-        requests.post(f"{BASE_URL}/api/predict", json=sample_packet)
-        inference_times.append((time.perf_counter() - t0) * 1000)
-
-    print(f">> ML Inference & Alert Latency:   {np.mean(inference_times):.2f} ms (Target: < 15 ms)")
-    print("==================================================")
-
-if __name__ == "__main__":
-    run_performance_audit()
+if __name__ == '__main__':
+    main()

@@ -1,6 +1,6 @@
-import React, { useContext } from 'react';
+import { useContext } from 'react';
 import { useOutletContext } from 'react-router-dom';
-import { TrafficContext } from '../context/TrafficContext';
+import { TrafficContext } from '../context/traffic';
 import { Chart as ChartJS, ArcElement, Tooltip, Legend } from 'chart.js';
 import { Doughnut } from 'react-chartjs-2';
 
@@ -16,13 +16,13 @@ const ProtocolBreakdown = () => {
 
   // Dynamically compute protocol counts from live packets
   const protocolCounts = packets.reduce((acc, pkt) => {
-    const proto = pkt[' Protocol'] || pkt['Protocol'] || pkt['proto'] || 'TCP';
-    const cleanProto = String(proto).toUpperCase().includes('17') || String(proto).toUpperCase().includes('UDP') ? 'UDP' 
-                     : String(proto).toUpperCase().includes('6') || String(proto).toUpperCase().includes('TCP') ? 'TCP' 
-                     : 'HTTP/HTTPS';
+    const proto = String(pkt['Protocol'] || pkt['proto'] || 'UNKNOWN').toUpperCase();
+    const cleanProto = ['17', 'UDP'].includes(proto) ? 'UDP'
+                     : ['6', 'TCP'].includes(proto) ? 'TCP'
+                     : ['1', 'ICMP'].includes(proto) ? 'ICMP' : 'Other / unknown';
     acc[cleanProto] = (acc[cleanProto] || 0) + 1;
     return acc;
-  }, { TCP: 14, UDP: 8, 'HTTP/HTTPS': 6 }); // Initial seed data
+  }, { TCP: 0, UDP: 0, ICMP: 0, 'Other / unknown': 0 });
 
   const doughnutData = {
     labels: Object.keys(protocolCounts),
@@ -37,8 +37,8 @@ const ProtocolBreakdown = () => {
   const doughnutOptions = {
     responsive: true,
     maintainAspectRatio: false,
-    plugins: { 
-      legend: { position: 'bottom', labels: { color: textColor, font: { size: 11 } } } 
+    plugins: {
+      legend: { position: 'bottom', labels: { color: textColor, font: { size: 11 } } }
     },
     cutout: '70%'
   };

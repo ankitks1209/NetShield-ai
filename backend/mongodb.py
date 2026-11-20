@@ -1,87 +1,72 @@
-import os
-from datetime import datetime
-from dotenv import load_dotenv
+"""Persistence helpers. Storage failures propagate instead of looking like empty data."""
+from datetime import datetime, timezone
+import hashlib
+
+from bson import ObjectId
 from pymongo import MongoClient
+from config import settings
 
-load_dotenv()
+client = MongoClient(settings.mongo_url, serverSelectionTimeoutMS=3000, connectTimeoutMS=3000, tz_aware=True, connect=False)
+mongo_db = client['netshield_ai']
+packet_logs = mongo_db['packet_logs']
+incident_logs = mongo_db['incident_logs']
+sensor_offsets = mongo_db['sensor_offsets']
 
-MONGO_URL = os.getenv("MONGO_URL") or os.getenv("MONGO_URI") or "mongodb+srv://Ankit:Ankit1234@netsheildai.pvnpkaq.mongodb.net/?appName=NetSheildAI"
+def utcnow():
+    return datetime.now(timezone.utc)
 
-client = MongoClient(MONGO_URL)
-mongo_db = client["netshield_ai"]  # database name — will be created on first write
+def serialize(doc):
+    data = dict(doc)
+    data['id'] = str(data.pop('_id'))
+    for key, value in tuple(data.items()):
+        if isinstance(value, datetime):
+            data[key] = value.replace(tzinfo=value.tzinfo or timezone.utc).isoformat()
+    data['time'] = data.pop('time_formatted', data.get('timestamp', ''))
+    data['assignee'] = data.pop('assigned_to', data.get('assignee', 'Unassigned'))
+    return data
 
-# Core Collections
-packet_logs = mongo_db["packet_logs"]
-incident_logs = mongo_db["incident_logs"]  # --- NEW: Dedicated threats collection ---
+def ensure_indexes():
+    packet_logs.create_index([('timestamp', -1)])
+    incident_logs.create_index([('timestamp', -1)])
+    incident_logs.create_index([('status', 1), ('timestamp', -1)])
+    incident_logs.create_index([('source', 1), ('timestamp', -1)])
+    incident_logs.create_index([('notification_status', 1), ('notification_next_attempt', 1)])
 
-def log_packet_to_db(packet_data: dict):
-    """
-    Schema for saving raw packets.
-    """
-    log_entry = {
-        "timestamp": datetime.utcnow(),
-        "packet_features": packet_data,
-        "analyzed": False,  
-        "threat_flag": "pending"
+def log_packet_to_db(packet_data):
+    event_id = packet_data['event_id']
+    entry = {
+        '_id': event_id, 'timestamp': utcnow(), 'packet_features': packet_data,
+        'analyzed': packet_data.get('analysis_status') == 'analyzed',
+        'is_anomaly': packet_data.get('is_anomaly'),
+        'simulated': packet_data.get('simulated', False),
+        'source_mode': packet_data.get('source_mode', 'api'),
+        'dataset': packet_data.get('dataset_used', packet_data.get('active_dataset')),
+        'sensor_id': packet_data.get('sensor_id'),
+        'event_time': packet_data.get('event_time'),
     }
-    try:
-        packet_logs.insert_one(log_entry)
-    except Exception as e:
-        print(f"MongoDB Insert Error: {e}")
+    packet_logs.update_one({'_id': event_id}, {'$setOnInsert': entry}, upsert=True)
 
-
-# ==========================================
-# --- NEW: INCIDENT PERSISTENCE LOGGING ---
-# ==========================================
-
-def log_anomaly_to_db(threat_data: dict):
-    """Saves a detected threat to the database permanently with SOC dashboard fields."""
-    current_time = datetime.utcnow()
-    
-    log_entry = {
-        "timestamp": current_time, # For strict backend sorting
-        "time_formatted": threat_data.get("time", datetime.now().strftime("%I:%M:%S %p")),
-        "source": threat_data.get("source", "Live Stream / AI"),
-        "type": threat_data.get("type", "Unknown Threat"),
-        "description": threat_data.get("description", "Anomalous signature detected."),
-        "severity": threat_data.get("severity", "Critical"),
-        "confidence": threat_data.get("confidence", "0.0%"),
-        
-        # --- NEW MILESTONE 3 FIELDS ---
-        "week_number": current_time.isocalendar()[1], 
-        "status": "Open", 
-        "assigned_to": "Unassigned", 
-        "investigation_notes": []
+def log_anomaly_to_db(threat_data):
+    from notifications import initial_status
+    # Stable incident ID makes retries idempotent across process restarts.
+    event_id = threat_data['event_id']
+    incident_id = ObjectId(hashlib.sha256(event_id.encode()).hexdigest()[:24])
+    now = utcnow()
+    entry = {
+        **threat_data, '_id': incident_id, 'timestamp': now,
+        'status': 'Open', 'assignee': 'Unassigned', 'investigation_notes': [],
+        'notification_status': initial_status(threat_data),
+        'notification_attempts': 0, 'notification_next_attempt': now,
     }
-    try:
-        result = incident_logs.insert_one(log_entry)
-        
-        # Format for React frontend
-        log_entry["id"] = str(result.inserted_id)
-        del log_entry["_id"] # Remove raw ObjectId (FastAPI can't JSON-serialize it)
-        log_entry["time"] = log_entry.pop("time_formatted")
-        
-        return log_entry
-    except Exception as e:
-        print(f"MongoDB Incident Insert Error: {e}")
-        return None
+    incident_logs.update_one({'_id': incident_id}, {'$setOnInsert': entry}, upsert=True)
+    return serialize(incident_logs.find_one({'_id': incident_id}))
 
-def get_recent_anomalies(limit: int = 50):
-    """Fetches the latest threats so React doesn't lose them on refresh."""
-    try:
-        # Sort by newest first
-        cursor = incident_logs.find().sort("timestamp", -1).limit(limit)
-        anomalies = []
-        for doc in cursor:
-            doc["id"] = str(doc["_id"])
-            del doc["_id"]
-            if "timestamp" in doc:
-                del doc["timestamp"] # Exclude raw datetime from JSON response
-            
-            # Map keys to match React frontend state
-            doc["time"] = doc.pop("time_formatted", "Unknown Time")
-            anomalies.append(doc)
-        return anomalies
-    except Exception as e:
-        print(f"MongoDB Fetch Error: {e}")
-        return []
+def get_recent_anomalies(limit=50):
+    return [serialize(doc) for doc in incident_logs.find().sort('timestamp', -1).limit(limit)]
+
+def get_sensor_checkpoint(key):
+    record = sensor_offsets.find_one({'_id': key})
+    return record.get('cursor') if record else None
+
+def save_sensor_checkpoint(key, cursor):
+    sensor_offsets.update_one({'_id': key}, {'$set': {'cursor': cursor, 'updated_at': utcnow()}}, upsert=True)

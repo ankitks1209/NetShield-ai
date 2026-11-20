@@ -1,4 +1,5 @@
-import React, { useState, useEffect } from 'react';
+import { apiFetch } from '../services/api';
+import { useState, useEffect } from 'react';
 import { useOutletContext } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 
@@ -11,7 +12,7 @@ const fadeInUp = {
 const Devices = () => {
   const { theme } = useOutletContext() || { theme: 'dark' };
   const isDark = theme === 'dark';
-  
+
   const [devices, setDevices] = useState([]);
   const [loading, setLoading] = useState(true);
 
@@ -19,7 +20,7 @@ const Devices = () => {
   useEffect(() => {
     const fetchDevices = async () => {
       try {
-        const response = await fetch('http://35.154.0.127:8000/api/system/devices');
+        const response = await apiFetch('/api/system/devices');
         if (response.ok) {
           const data = await response.json();
           if (data.status === 'success') {
@@ -39,8 +40,8 @@ const Devices = () => {
   }, []);
 
   // Surface Tokens
-  const cardMaterial = isDark 
-    ? 'bg-[#121214]/65 border border-white/[0.08] shadow-[0_4px_24px_rgba(0,0,0,0.35)] backdrop-blur-xl rounded-2xl' 
+  const cardMaterial = isDark
+    ? 'bg-[#121214]/65 border border-white/[0.08] shadow-[0_4px_24px_rgba(0,0,0,0.35)] backdrop-blur-xl rounded-2xl'
     : 'bg-white/70 border border-black/[0.06] shadow-[0_4px_20px_rgba(0,0,0,0.03)] backdrop-blur-xl rounded-2xl';
   const textPrimary = isDark ? 'text-[#F2F2F0]' : 'text-[#1D1D1F]';
   const textMuted = isDark ? 'text-[#9A9A97]' : 'text-[#86868B]';
@@ -60,10 +61,10 @@ const Devices = () => {
             <div className={`col-span-3 py-12 text-center ${textMuted}`}>No active devices detected on the management interface.</div>
           ) : (
             devices.map((device, i) => (
-              <motion.div 
-                {...fadeInUp} 
-                transition={{ delay: i * 0.1 }} 
-                key={device.id || i} 
+              <motion.div
+                {...fadeInUp}
+                transition={{ delay: i * 0.1 }}
+                key={device.id || i}
                 className={`${cardMaterial} p-6 relative overflow-hidden group hover:scale-[1.02] transition-transform`}
               >
                 <div className={`absolute top-0 left-0 w-1.5 h-full ${device.status === 'Online' ? 'bg-emerald-500' : 'bg-red-500'}`}></div>
@@ -73,8 +74,8 @@ const Devices = () => {
                     <span className={`text-[12px] font-medium ${textMuted}`}>{device.type}</span>
                   </div>
                   <span className={`px-2.5 py-1 rounded-md text-[11px] font-bold border ${
-                    device.status === 'Online' 
-                      ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20' 
+                    device.status === 'Online'
+                      ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20'
                       : 'bg-red-500/10 text-red-600 dark:text-red-400 border-red-500/20'
                   }`}>{device.status}</span>
                 </div>

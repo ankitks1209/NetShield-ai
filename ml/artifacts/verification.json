@@ -1,0 +1,32 @@
+{
+  "verified_at": "2026-11-20T17:55:18.985621+00:00",
+  "checks": {
+    "zeek-flow-v1": {
+      "holdout_metrics_reproduced": true,
+      "threshold_reproduced": true,
+      "reload_prediction_samples": 20,
+      "probabilities_reproduced_atol": 1e-12,
+      "model_version": "ad50329a8c54caa2"
+    },
+    "unsw-full-v1": {
+      "holdout_metrics_reproduced": true,
+      "threshold_reproduced": true,
+      "reload_prediction_samples": 20,
+      "probabilities_reproduced_atol": 1e-12,
+      "model_version": "77e70f242022644a"
+    },
+    "cicids-full-v1": {
+      "holdout_metrics_reproduced": true,
+      "threshold_reproduced": true,
+      "reload_prediction_samples": 20,
+      "probabilities_reproduced_atol": 1e-12,
+      "model_version": "85e6930a6535f810"
+    }
+  },
+  "regression_suite": {
+    "tests": 85,
+    "result": "passed"
+  },
+  "live_activation": false,
+  "scope": "Repeated fixed-seed training, unchanged held-out metrics, and exported pipeline prediction comparison; not live accuracy validation"
+}

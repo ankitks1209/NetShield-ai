@@ -1,13 +1,13 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import NetworkField from '../components/NetworkField';
 import { authAPI } from '../services/api';
-import { useAuth } from '../context/AuthContext';
+import { useAuth } from '../context/auth';
 
 const Login = () => {
   const navigate = useNavigate();
   const { login } = useAuth();
-  
+
   // Theme sync with localStorage
   const [isDark, setIsDark] = useState(() => {
     return localStorage.getItem('theme') !== 'light';
@@ -29,8 +29,7 @@ const Login = () => {
 
     try {
       const data = await authAPI.login({ email, password });
-      console.log("LOGIN API RESPONSE:", data); // <-- Check your browser console to see what fields come back!
-      
+
       // Safely handle token extraction whether it's access_token or token
       const token = data.access_token || data.token;
       const user = data.user || data.account;
@@ -70,7 +69,7 @@ const Login = () => {
       <NetworkField isDark={isDark} />
 
       {/* Theme Toggle Button (Absolute Top Right) */}
-      <button 
+      <button
         onClick={() => setIsDark(!isDark)}
         className={`absolute top-8 right-8 z-50 p-2 rounded-full ${textMuted} hover:${textMain} active:scale-90 transition-all`}
         aria-label="Toggle Theme"

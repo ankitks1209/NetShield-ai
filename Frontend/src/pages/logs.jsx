@@ -1,4 +1,5 @@
-import React, { useState, useEffect } from 'react';
+import { apiFetch } from '../services/api';
+import { useState, useEffect } from 'react';
 import { useOutletContext } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 
@@ -17,31 +18,16 @@ const Logs = () => {
   const [loading, setLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
 
-  const fetchLogs = async (isManual = false) => {
-    if (isManual) setIsRefreshing(true);
-    try {
-      // Connects to your FastAPI backend to retrieve actual infrastructure/system logs
-      const response = await fetch('http://35.154.0.127:8000/api/logs');
-      if (response.ok) {
-        const data = await response.json();
-        if (data.status === 'success' && data.logs) {
-          setLogs(data.logs);
-        }
-      } else {
-        console.warn("Logs endpoint returned an error status.");
-      }
-    } catch (error) {
-      console.error("Failed to connect to backend logs stream:", error);
-    } finally {
-      setLoading(false);
-      if (isManual) setTimeout(() => setIsRefreshing(false), 500); // UI feedback delay
-    }
-  };
+  const fetchLogs = (isManual = false) => apiFetch('/api/logs').then(response => response.json())
+    .then(data => setLogs(data.logs)).catch(error => console.error(error.message))
+    .finally(() => { setLoading(false); if (isManual) setIsRefreshing(false); });
 
-  // Initial fetch and auto-polling setup (every 10 seconds)
   useEffect(() => {
-    fetchLogs();
-    const interval = setInterval(() => fetchLogs(), 10000);
+    const load = () => apiFetch('/api/logs').then(response => response.json())
+      .then(data => setLogs(data.logs)).catch(error => console.error(error.message))
+      .finally(() => setLoading(false));
+    load();
+    const interval = setInterval(load, 10000);
     return () => clearInterval(interval);
   }, []);
 
@@ -50,8 +36,8 @@ const Logs = () => {
   // Surface Tokens
   const textPrimary = isDark ? 'text-[#F2F2F0]' : 'text-[#1D1D1F]';
   const textMuted = isDark ? 'text-[#9A9A97]' : 'text-[#86868B]';
-  const cardMaterial = isDark 
-    ? 'bg-[#121214]/65 border border-white/[0.08] shadow-[0_4px_24px_rgba(0,0,0,0.35)] backdrop-blur-xl rounded-2xl' 
+  const cardMaterial = isDark
+    ? 'bg-[#121214]/65 border border-white/[0.08] shadow-[0_4px_24px_rgba(0,0,0,0.35)] backdrop-blur-xl rounded-2xl'
     : 'bg-white/70 border border-black/[0.06] shadow-[0_4px_20px_rgba(0,0,0,0.03)] backdrop-blur-xl rounded-2xl';
 
   // Log Level Styling
@@ -66,18 +52,18 @@ const Logs = () => {
 
   return (
     <div className="space-y-6 h-[calc(100vh-8rem)] flex flex-col transition-colors duration-500">
-      
+
       {/* HEADER BAR */}
       <div className="flex flex-col md:flex-row justify-between items-start md:items-end gap-4">
         <div>
           <h2 className={`text-[24px] font-semibold tracking-tight ${textPrimary}`}>System & Event Logs</h2>
-          <p className={`text-[13px] ${textMuted} mt-0.5`}>Raw application, database, and infrastructure event stream</p>
+          <p className={`text-[13px] ${textMuted} mt-0.5`}>Recorded account and administrative actions</p>
         </div>
-        
+
         <div className="flex items-center gap-4">
           {/* Manual Refresh Button */}
-          <button 
-            onClick={() => fetchLogs(true)}
+          <button
+            onClick={() => { setIsRefreshing(true); fetchLogs(true); }}
             className={`flex items-center justify-center p-2 rounded-full transition-all active:scale-90 ${isDark ? 'hover:bg-white/10 text-white' : 'hover:bg-black/5 text-black'}`}
             title="Refresh Logs"
           >
@@ -89,12 +75,12 @@ const Logs = () => {
           {/* Filter Toggles */}
           <div className={`flex items-center gap-1.5 p-1.5 rounded-xl ${isDark ? 'bg-white/5' : 'bg-black/5'}`}>
             {['All', 'INFO', 'WARN', 'ERROR'].map(level => (
-              <button 
-                key={level} 
+              <button
+                key={level}
                 onClick={() => setLogType(level)}
                 className={`px-4 py-1.5 rounded-lg text-[12px] font-semibold transition-all active:scale-95 cursor-pointer border ${
-                  logType === level 
-                    ? `bg-white text-black shadow-sm dark:bg-[#1C1C1E] dark:text-white dark:border-white/10` 
+                  logType === level
+                    ? `bg-white text-black shadow-sm dark:bg-[#1C1C1E] dark:text-white dark:border-white/10`
                     : `border-transparent ${textMuted} hover:${textPrimary} hover:bg-black/5 dark:hover:bg-white/5`
                 }`}
               >
@@ -107,7 +93,7 @@ const Logs = () => {
 
       {/* CONSOLE TERMINAL WINDOW */}
       <motion.div {...fadeInUp} className={`flex-1 flex flex-col overflow-hidden font-mono ${cardMaterial}`}>
-        
+
         {/* Terminal Header */}
         <div className={`px-4 py-3 flex items-center border-b ${isDark ? 'border-white/10 bg-white/[0.02]' : 'border-black/5 bg-black/[0.01]'}`}>
           <div className="flex gap-1.5">
@@ -132,16 +118,16 @@ const Logs = () => {
               </motion.div>
             ) : (
               filteredLogs.map((log, index) => (
-                <motion.div 
+                <motion.div
                   initial={{ opacity: 0, x: -10 }}
                   animate={{ opacity: 1, x: 0 }}
                   transition={{ delay: index * 0.02 }}
-                  key={log.id || index} 
+                  key={log.id || index}
                   className={`flex flex-col sm:flex-row sm:gap-4 text-[12px] py-1.5 px-3 rounded-md transition-colors ${isDark ? 'hover:bg-white/[0.04]' : 'hover:bg-black/[0.03]'}`}
                 >
                   <div className="flex gap-4 shrink-0">
                     <span className={`${textMuted} w-20 shrink-0`}>
-                      {log.time || log.timestamp || new Date().toLocaleTimeString()}
+                      {log.timestamp ? new Date(log.timestamp).toLocaleTimeString() : 'Unavailable'}
                     </span>
                     <span className={`w-12 shrink-0 font-bold ${getLevelColor(log.level)}`}>
                       {log.level}
@@ -158,7 +144,7 @@ const Logs = () => {
             )}
           </AnimatePresence>
         </div>
-        
+
       </motion.div>
     </div>
   );

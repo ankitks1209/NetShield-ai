@@ -1,0 +1,13 @@
+# Explicit experimental shadow mode. Cannot activate production classification.
+services:
+  backend:
+    environment:
+      FLOW_MODEL_MODE: shadow
+      FLOW_MODEL_DIR: /flow-candidate
+    volumes:
+      - type: bind
+        source: ${FLOW_MODEL_HOST_DIR:?Set FLOW_MODEL_HOST_DIR to the evaluated candidate directory}
+        target: /flow-candidate
+        read_only: true
+        bind:
+          create_host_path: false

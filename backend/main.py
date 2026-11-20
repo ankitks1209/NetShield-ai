@@ -1,797 +1,429 @@
-import os
-import time
-import json
+"""NetShield API: authenticated operations backed by shared detection services."""
 import asyncio
-import urllib.request
-import urllib.error
-from datetime import datetime
-from typing import Optional, List
-from collections import Counter
-from pydantic import EmailStr
-from fastapi import Request
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-
-import io
+from collections import Counter, OrderedDict
+from contextlib import asynccontextmanager
 import csv
-from fastapi.responses import StreamingResponse
+from datetime import datetime, timezone
+import io
+import json
+import logging
+import threading
+import time
 
-from fastapi import FastAPI, HTTPException, Depends, Query, BackgroundTasks
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import OAuth2PasswordBearer
-from sqlalchemy.orm import Session
-from pydantic import BaseModel
-from jose import jwt, JWTError
 from bson import ObjectId
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.exceptions import RequestValidationError
+from pymongo.errors import PyMongoError
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from sqlalchemy.orm import Session
 
-import joblib
-import pandas as pd
-import numpy as np
-
-# --- LOCAL MODULE IMPORTS ---
-import traffic
-from database import get_db, engine, Base
-from models import User, AuditLog
-from schemas import RegisterRequest, LoginRequest, UserResponse, TokenResponse
-from auth_utils import hash_password, verify_password, create_access_token
-
-# --- MONGODB IMPORTS ---
-# --- MONGODB IMPORTS ---
-from mongodb import log_anomaly_to_db, get_recent_anomalies, incident_logs
-
-app = FastAPI(title="NetShield AI Backend", version="3.0.0")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
-    allow_headers=["*"],
+from auth_utils import create_access_token, hash_password, password_version, verify_password
+from config import settings
+from database import Base, engine, get_db
+from detection import detector, InvalidFeatures, ModelUnavailable
+from models import AuditLog, User
+import mongodb as storage
+from pipeline import persist_detection, process_detection
+from schemas import (
+    InviteRequest, LoginRequest, PasswordUpdateRequest, PredictionRequest, ProfileUpdateRequest,
+    RegisterRequest, TokenResponse, UpdateAlertRequest, UserResponse, UserUpdateRequest,
 )
+from security import get_current_user, normalize_role, require_admin
+from traffic import broker, router as traffic_router
+from notifications import notification_worker, webhook_url
+from flow_candidate import flow_candidate
 
-# Automatically create PostgreSQL tables (users, audit_logs) if they don't exist
-Base.metadata.create_all(bind=engine)
+logger = logging.getLogger(__name__)
 
-# --- SYSTEM SETTINGS IN-MEMORY STORE ---
-system_settings_db = {
-    "fastapiUrl": "http://localhost:8000",
-    "retention": "30 Days",
-    "interface": "enp39s0 (MacBook Air Network)",
-    "promiscuous": True,
-    "jwtExpiry": 60,
-    "mfaEnforced": True,
-    "baselineSensitivity": 85,
-    "autoBan": True,
-    "profileName": "Ankit Singh",
-    "profileEmail": "ankit@netshield.com"
-}
-
-# --- LOAD BOTH ML ENGINES INTO MEMORY ---
-print("Loading NetShield AI models into memory...")
-
-class InviteRequest(BaseModel):
-    email: EmailStr
-    role: str
-
-class ProfileUpdateRequest(BaseModel):
-    full_name: str
-    email: EmailStr    
-
-class PasswordUpdateRequest(BaseModel):
-    current_password: str
-    new_password: str
-
-class UserUpdateRequest(BaseModel):
-    role: str
-    is_active: bool
-
-try:
-    rf_model = joblib.load("rf_model_optimized.joblib")
-    encoder_cicids = joblib.load("label_encoder.joblib")
-    print("Engine 1 Ready: Random Forest (CICIDS2017) loaded.")
-except Exception as e:
-    print(f"Warning: Failed to load Random Forest model: {e}")
-    rf_model = None
-    encoder_cicids = None
-
-try:
-    xgb_model = joblib.load("xgboost_unsw_model.joblib")
-    encoder_unsw = joblib.load("label_encoder1.joblib")
-    features_unsw = joblib.load("model_features.joblib") if os.path.exists("model_features.joblib") else None
-    print("Engine 2 Ready: XGBoost (UNSW-NB15) loaded.")
-except Exception as e:
-    print(f"Warning: Failed to load XGBoost model: {e}")
-    xgb_model = None
-    encoder_unsw = None
-    features_unsw = None
-
-# --- CORS MIDDLEWARE ---
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://35.154.0.127:5173",
-        "http://localhost:5173"
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-app.include_router(traffic.router)
-
-@app.get("/health")
-def health_check():
-    return {
-        "status": "ok",
-        "service": "NetShield AI Backend",
-        "version": "3.0.0",
-        "models_active": {
-            "random_forest_cicids": rf_model is not None,
-            "xgboost_unsw": xgb_model is not None
-        }
-    }
-# =========================================================
-# --- AUTHENTICATION & RBAC SECURITY SETUP ---
-# =========================================================
-# Strict mode - auto_error=False handles missing tokens gracefully for manual rejection
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=False)
-
-# MATCH THIS EXACTLY TO auth_utils.py
-SECRET_KEY = "netshield_super_secret_key_2026"
-ALGORITHM = "HS256"
-
-def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
-    if not token:
-        print("🚨 AUTH FAIL: No token received from React frontend.")
-    # SAFEKEEPING: Strip any rogue quotes added by JSON.stringify in React
-    clean_token = token.replace('"', '').replace("'", "")
-
+@asynccontextmanager
+async def lifespan(app):
+    webhook_url()  # Reject insecure notification URLs before starting collectors.
+    await asyncio.to_thread(Base.metadata.create_all, bind=engine)
+    await asyncio.to_thread(detector.load)
+    await asyncio.to_thread(flow_candidate.load, settings.flow_model_dir, settings.flow_model_mode)
     try:
-        payload = jwt.decode(clean_token, SECRET_KEY, algorithms=[ALGORITHM])
-        user_id: str = payload.get("sub")
-        if user_id is None:
-            print("🚨 AUTH FAIL: Token decoded, but 'sub' (user_id) is missing.")
-            raise HTTPException(status_code=401, detail="Invalid token structure")
-    except JWTError as e:
-        print(f"🚨 AUTH FAIL: JWT Decode Error -> {str(e)}")
-        raise HTTPException(status_code=401, detail=f"Token rejected: {str(e)}")
-        
-    user = db.query(User).filter(User.id == int(user_id)).first()
-    if user is None:
-        print("🚨 AUTH FAIL: User ID from token no longer exists in database.")
-        raise HTTPException(status_code=401, detail="User not found")
-        
+        await asyncio.to_thread(storage.ensure_indexes)
+    except PyMongoError:
+        logger.exception('Storage indexes unavailable; collectors will retry persistence')
+    await broker.start()
+    notification_task = asyncio.create_task(notification_worker())
+    try:
+        yield
+    finally:
+        await broker.stop()
+        notification_task.cancel()
+        await asyncio.gather(notification_task, return_exceptions=True)
+
+app = FastAPI(title='NetShield AI Backend', version='3.1.0', lifespan=lifespan)
+app.add_middleware(CORSMiddleware, allow_origins=list(settings.origins), allow_credentials=True,
+                   allow_methods=['GET', 'POST', 'PUT', 'PATCH', 'OPTIONS'], allow_headers=['Authorization', 'Content-Type', 'Cache-Control', 'Pragma'])
+api = APIRouter(prefix='/api', dependencies=[Depends(get_current_user)])
+app.include_router(traffic_router)
+
+@app.exception_handler(RequestValidationError)
+async def invalid_request(request, exc):
+    # Do not echo passwords, arbitrary payloads, or non-JSON NaN/Inf values.
+    errors = [{key: error[key] for key in ('loc', 'msg', 'type')} for error in exc.errors()]
+    return JSONResponse(status_code=422, content={'detail': errors})
+
+@app.exception_handler(PyMongoError)
+async def mongo_unavailable(request, exc):
+    logger.error('MongoDB operation failed: %s', type(exc).__name__)
+    return JSONResponse(status_code=503, content={'detail': 'Incident storage is unavailable; retry later'})
+
+@app.exception_handler(SQLAlchemyError)
+async def sql_unavailable(request, exc):
+    logger.error('SQL operation failed: %s', type(exc).__name__)
+    return JSONResponse(status_code=503, content={'detail': 'Account storage is unavailable; retry later'})
+
+def audit(db, user, action, target, details=None):
+    db.add(AuditLog(user_id=user.id, action=action, target=target, details=details))
+
+def user_payload(user):
+    return {**UserResponse.model_validate(user).model_dump(), 'role': normalize_role(user.role)}
+
+# Bounded, process-local throttling. Use an edge/shared limiter for multi-instance deployments.
+attempts = OrderedDict()
+attempt_lock = threading.Lock()
+
+def throttle(request, identity, limit=10):
+    key = (request.client.host if request.client else 'unknown', identity.lower())
+    now = time.monotonic()
+    with attempt_lock:
+        bucket = [t for t in attempts.pop(key, []) if now - t < 300]
+        if len(bucket) >= limit:
+            attempts[key] = bucket
+            raise HTTPException(429, 'Too many attempts; try again later', headers={'Retry-After': '300'})
+        attempts[key] = [*bucket, now]
+        while len(attempts) > 5000:
+            attempts.popitem(last=False)
+
+@app.get('/health')
+def health_check():
+    return {'status': 'ok', 'service': 'NetShield AI Backend', 'version': '3.1.0'}
+
+@api.get('/ready')
+def readiness(db: Session = Depends(get_db)):
+    db.execute(text('SELECT 1'))
+    storage.client.admin.command('ping')
+    return {'status': 'ready', 'models_active': {name: name in detector.engines for name in ['cicids2017', 'unsw-nb15']},
+            'sources': broker.snapshot()}
+
+@app.post('/api/auth/register', response_model=UserResponse)
+def register(payload: RegisterRequest, request: Request, db: Session = Depends(get_db)):
+    throttle(request, 'register', 10)
+    email = str(payload.email).lower()
+    if db.query(User).filter((User.email == email) | (User.username == payload.username)).first():
+        raise HTTPException(409, 'Email or username already registered')
+    user = User(full_name=payload.full_name.strip(), username=payload.username, email=email,
+                hashed_password=hash_password(payload.password), role='analyst')
+    db.add(user)
+    try:
+        db.flush()
+        audit(db, user, 'USER_REGISTERED', user.username)
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, 'Email or username already registered')
+    db.refresh(user)
     return user
 
-def require_admin(current_user: User = Depends(get_current_user)):
-    # Made case-insensitive to accept "Admin", "administrator", etc.
-    if current_user.role.lower() not in ["admin", "administrator", "admin (lead)"]:
-        raise HTTPException(status_code=403, detail="Access Denied: SOC Administrator clearance required.")
-    return current_user
-
-def log_audit_action(db: Session, user_id: int, action: str, target: str, details: str = None):
-    try:
-        audit_entry = AuditLog(user_id=user_id, action=action, target=target, details=details)
-        db.add(audit_entry)
-        db.commit()
-    except Exception as e:
-        print(f"Audit Log Error: {e}")
-
-@app.post("/api/auth/register", response_model=UserResponse)
-def register(payload: RegisterRequest, db: Session = Depends(get_db)):
-    existing_user = db.query(User).filter((User.email == payload.email) | (User.username == payload.username)).first()
-    if existing_user:
-        raise HTTPException(status_code=400, detail="Email or username already registered")
-
-    new_user = User(
-        full_name=payload.full_name,
-        username=payload.username,
-        email=payload.email,
-        hashed_password=hash_password(payload.password),
-        role=payload.role,
-    )
-    db.add(new_user)
+@app.post('/api/auth/login', response_model=TokenResponse)
+def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)):
+    throttle(request, str(payload.email))
+    user = db.query(User).filter(User.email == str(payload.email).lower()).first()
+    if not user or not user.is_active or not verify_password(payload.password, user.hashed_password):
+        raise HTTPException(401, 'Invalid email or password')
+    if normalize_role(user.role) not in {'analyst', 'administrator'}:
+        raise HTTPException(401, 'Invalid email or password')
+    audit(db, user, 'USER_LOGIN', 'Authentication')
     db.commit()
-    db.refresh(new_user)
-    return new_user
+    token = create_access_token({'sub': str(user.id), 'pv': password_version(user.hashed_password)})
+    return {'access_token': token, 'token_type': 'bearer', 'user': user_payload(user)}
 
-@app.post("/api/auth/login", response_model=TokenResponse)
-def login(payload: LoginRequest, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == payload.email).first()
-    if not user or not verify_password(payload.password, user.hashed_password):
-        raise HTTPException(status_code=401, detail="Invalid email or password")
+@api.get('/auth/me')
+def current_account(user: User = Depends(get_current_user)):
+    return {'user': user_payload(user)}
 
-    log_audit_action(
-        db=db, user_id=user.id, action="USER_LOGIN", target="Authentication Portal",
-        details=f"User {user.username} logged in successfully."
-    )
-    access_token = create_access_token(data={"sub": str(user.id), "role": user.role})
-    return TokenResponse(access_token=access_token, user=user)
+@api.get('/admin/audit-logs')
+def get_audit_logs(db: Session = Depends(get_db), admin: User = Depends(require_admin)):
+    rows = db.query(AuditLog).order_by(AuditLog.timestamp.desc()).limit(100).all()
+    return {'status': 'success', 'logs': [
+        {'id': row.id, 'user_id': row.user_id, 'action': row.action, 'target': row.target,
+         'details': row.details, 'timestamp': row.timestamp.replace(tzinfo=row.timestamp.tzinfo or timezone.utc).isoformat()}
+        for row in rows]}
 
-@app.get("/api/admin/audit-logs")
-def get_audit_logs(db: Session = Depends(get_db), admin_user: User = Depends(require_admin)):
-    logs = db.query(AuditLog).order_by(AuditLog.timestamp.desc()).limit(50).all()
-    formatted_logs = [{
-        "id": log.id, "user_id": log.user_id, "action": log.action, "target": log.target,
-        "details": log.details, "timestamp": log.timestamp.strftime("%Y-%m-%d %I:%M:%S %p") if log.timestamp else "N/A"
-    } for log in logs]
-    return {"status": "success", "logs": formatted_logs}
+def run_prediction(payload, simulated=False):
+    try:
+        if payload.force_attack:
+            if not simulated:
+                raise HTTPException(422, 'Synthetic attacks are only available in the simulation endpoint')
+            return persist_detection({
+                'status': 'success', 'analysis_status': 'simulated', 'dataset_used': payload.dataset,
+                'ai_classification': 'Simulated DDoS', 'prediction': 'Simulated DDoS', 'is_anomaly': True,
+                'confidence': None, 'confidence_raw': None, 'severity': 'High', 'model_version': None,
+            }, 'Analyst simulation', source_mode='simulation', simulated=True)
+        return process_detection(payload.dataset, payload.features, payload.source_ip,
+                                 source_mode='simulation' if simulated else 'api', simulated=simulated)
+    except InvalidFeatures as exc:
+        raise HTTPException(422, str(exc))
+    except ModelUnavailable as exc:
+        raise HTTPException(503, str(exc))
 
-@app.get("/api/model-metrics/{dataset}")
+@api.post('/predict')
+def predict_threat(payload: PredictionRequest):
+    return run_prediction(payload)
+
+@api.post('/predict-manual')
+def predict_manual_packet(payload: PredictionRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    result = run_prediction(payload, simulated=True)
+    audit(db, user, 'SIMULATED_DETECTION', result['event_id'], 'Excluded from operational metrics')
+    db.commit()
+    return result
+
+@api.get('/model-metrics/{dataset}')
 def get_model_metrics(dataset: str):
-    dataset_key = dataset.lower()
-    file_path = "unsw_metrics.json" if dataset_key in ["unsw", "unsw-nb15"] else "cicids_metrics.json"
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail=f"Metrics file '{file_path}' not found.")
-    with open(file_path, "r") as f:
-        metrics = json.load(f)
-    return metrics
+    names = {'cicids2017': 'cicids_metrics.json', 'unsw-nb15': 'unsw_metrics.json'}
+    if dataset not in names:
+        raise HTTPException(422, 'Select CICIDS2017 or UNSW-NB15 to view a saved benchmark')
+    path = settings.model_dir / names[dataset]
+    if not path.is_file(): raise HTTPException(404, 'Saved benchmark is unavailable')
+    return {**json.loads(path.read_text()), 'provenance': 'Legacy saved benchmark; evaluation has not been reproduced'}
 
-# =========================================================
-# --- EXTERNAL NOTIFICATION BACKGROUND TASK ---
-# =========================================================
-async def dispatch_external_alert(alert_payload: dict):
-    print(f"\n{'='*55}\n🚨 [EXTERNAL SOC NOTIFICATION DISPATCHED]\nTarget: Security Team Webhook\nThreat Type: {alert_payload.get('type')}\n{'='*55}\n")
-    webhook_url = os.getenv("SLACK_WEBHOOK_URL", "")
-    if webhook_url:
-        try:
-            message = {
-                "text": f"🚨 *CRITICAL SOC ALERT* 🚨\n*Vector:* {alert_payload.get('type')}\n*Source:* {alert_payload.get('source')}\n*Confidence:* {alert_payload.get('confidence')}"
-            }
-            req = urllib.request.Request(webhook_url, data=json.dumps(message).encode('utf-8'), headers={'Content-Type': 'application/json'})
-            urllib.request.urlopen(req, timeout=3)
-        except Exception as e:
-            print(f"Failed to route external Webhook: {e}")
+def alert_query(include_simulated=False):
+    return {} if include_simulated else {'simulated': {'$ne': True}}
 
-# =========================================================
-# --- REAL-TIME AI PREDICTION ENDPOINT ---
-# =========================================================
-@app.post("/api/predict")
-async def predict_threat(data: dict, background_tasks: BackgroundTasks):
-    try:
-        dataset_mode = data.get("dataset", "cicids2017").lower()
-        raw_features = data.get("features", [])
-        
-        if dataset_mode in ["unsw", "unsw-nb15"]:
-            if xgb_model is None or encoder_unsw is None:
-                raise HTTPException(status_code=500, detail="UNSW XGBoost model offline")
-            model = xgb_model
-            encoder = encoder_unsw
-        else:
-            if rf_model is None or encoder_cicids is None:
-                raise HTTPException(status_code=500, detail="CICIDS Random Forest model offline")
-            model = rf_model
-            encoder = encoder_cicids
-
-        features = np.array([raw_features])
-        prediction_code = model.predict(features)[0]
-        threat_label = encoder.inverse_transform([prediction_code])[0] if isinstance(prediction_code, (int, np.integer)) else str(prediction_code)
-            
-        probabilities = model.predict_proba(features)[0]
-        max_prob = float(np.max(probabilities))
-        confidence_percentage = round(max_prob * 100, 2)
-        
-        is_anomaly = str(threat_label).upper() not in ["BENIGN", "NORMAL"]
-        
-        response_payload = {
-            "status": "success", "dataset_used": dataset_mode, "prediction": str(threat_label),
-            "is_anomaly": bool(is_anomaly), "confidence": f"{confidence_percentage}%", "confidence_raw": max_prob
-        }
-        
-        if is_anomaly:
-            calc_severity = "Critical" if confidence_percentage >= 98.0 else ("High" if confidence_percentage >= 95.0 else "Medium")
-            threat_doc = {
-                "time": datetime.now().strftime("%I:%M:%S %p"),
-                "timestamp": datetime.utcnow(),
-                "source": data.get("source_ip", "Packet Engine"),
-                "type": str(threat_label),
-                "severity": calc_severity,
-                "confidence": f"{confidence_percentage}%",
-                "description": f"AI Engine baseline deviation detected in {dataset_mode.upper()} mode"
-            }
-            log_anomaly_to_db(threat_doc)
-            
-            if calc_severity in ["Critical", "High"]:
-                background_tasks.add_task(dispatch_external_alert, threat_doc)
-
-        return response_payload
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-@app.post("/api/predict-manual")
-def predict_manual_packet(data: dict, background_tasks: BackgroundTasks):
-    try:
-        force_attack = data.get("force_attack", False)
-        dataset_mode = data.get("dataset", "cicids2017").lower()
-        
-        if force_attack:
-            mock_threats = ["DDoS_SYN", "PortScan", "BruteForce_SSH", "Data_Exfiltration", "Exploits", "Fuzzers"]
-            threat_label = np.random.choice(mock_threats)
-            dynamic_conf = round(float(np.random.uniform(88.0, 99.9)), 2)
-            
-            response_payload = {
-                "status": "success", "ai_classification": str(threat_label), "is_anomaly": True,
-                "confidence": f"{dynamic_conf}%", "dataset_used": dataset_mode
-            }
-            
-            calc_severity = "Critical" if dynamic_conf >= 97.0 else ("High" if dynamic_conf >= 92.0 else "Medium")
-            threat_doc = {
-                "time": datetime.now().strftime("%I:%M:%S %p"),
-                "timestamp": datetime.utcnow(),
-                "source": "Manual Sandbox Trigger",
-                "type": str(threat_label),
-                "severity": calc_severity,
-                "confidence": f"{dynamic_conf}%",
-                "description": "Simulated signature explicitly injected by analyst"
-            }
-            log_anomaly_to_db(threat_doc)
-            
-            if calc_severity in ["Critical", "High"]:
-                background_tasks.add_task(dispatch_external_alert, threat_doc)
-
-            return response_payload
-
-        # Normal routing (Sandbox Prediction)
-        if dataset_mode in ["unsw", "unsw-nb15"]:
-            model, encoder, expected_dim = xgb_model, encoder_unsw, len(features_unsw) if features_unsw else 42
-        else:
-            model, encoder, expected_dim = rf_model, encoder_cicids, 78
-
-        features = data.get("features", [])
-        features = features[:expected_dim] if len(features) >= expected_dim else list(features) + [0.0] * (expected_dim - len(features))
-        
-        input_data = np.array([features])
-        prediction_code = model.predict(input_data)[0]
-        threat_label = encoder.inverse_transform([prediction_code])[0] if isinstance(prediction_code, (int, np.integer)) else str(prediction_code)
-            
-        probabilities = model.predict_proba(input_data)[0]
-        max_prob = float(np.max(probabilities))
-        confidence_percentage = round(max_prob * 100, 2)
-        is_anomaly = str(threat_label).upper() not in ["BENIGN", "NORMAL"]
-
-        response_payload = {
-            "status": "success", "ai_classification": str(threat_label), "is_anomaly": bool(is_anomaly),
-            "confidence": f"{confidence_percentage}%", "dataset_used": dataset_mode
-        }
-        
-        if is_anomaly:
-            calc_severity = "Critical" if confidence_percentage >= 98.0 else ("High" if confidence_percentage >= 95.0 else "Medium")
-            threat_doc = {
-                "time": datetime.now().strftime("%I:%M:%S %p"),
-                "timestamp": datetime.utcnow(),
-                "source": "Manual Sandbox Check",
-                "type": str(threat_label),
-                "severity": calc_severity,
-                "confidence": f"{confidence_percentage}%",
-                "description": "True anomaly detected in manually injected packet"
-            }
-            log_anomaly_to_db(threat_doc)
-            
-            if calc_severity in ["Critical", "High"]:
-                background_tasks.add_task(dispatch_external_alert, threat_doc)
-
-        return response_payload
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# =========================================================
-# --- UNIFIED SYSTEM LOGS & CONSOLE STREAM ---
-# =========================================================
-@app.get("/api/logs")
-def get_unified_system_logs(db: Session = Depends(get_db)):
-    try:
-        unified_logs = []
-        
-        def make_naive(dt_obj):
-            if not isinstance(dt_obj, datetime):
-                return datetime.utcnow()
-            return dt_obj.replace(tzinfo=None)
-        
-        audit_records = db.query(AuditLog).order_by(AuditLog.timestamp.desc()).limit(30).all()
-        for record in audit_records:
-            unified_logs.append({
-                "id": f"sys_{record.id}",
-                "time": record.timestamp.strftime("%H:%M:%S") if record.timestamp else datetime.now().strftime("%H:%M:%S"),
-                "timestamp_obj": make_naive(record.timestamp),
-                "source": "Auth-Service" if "LOGIN" in str(record.action).upper() else "System",
-                "level": "INFO",
-                "message": f"[{record.target}] {record.details}"
-            })
-            
-        threat_records = list(incident_logs.find({}).sort("timestamp", -1).limit(30))
-        for record in threat_records:
-            raw_time = record.get("timestamp") or datetime.utcnow()
-            severity = str(record.get("severity", "Medium")).upper()
-            level = "ERROR" if severity == "CRITICAL" else "WARN" if severity == "HIGH" else "INFO"
-            
-            unified_logs.append({
-                "id": f"sec_{str(record['_id'])}",
-                "time": raw_time.strftime("%H:%M:%S") if isinstance(raw_time, datetime) else str(record.get("time", "")),
-                "timestamp_obj": make_naive(raw_time),
-                "source": "AI-Classifier",
-                "level": level,
-                "message": f"Detected {record.get('type')} from {record.get('source')} (Confidence: {record.get('confidence')})"
-            })
-
-        unified_logs.append({
-            "id": "sys_heartbeat_001",
-            "time": datetime.now().strftime("%H:%M:%S"),
-            "timestamp_obj": make_naive(datetime.utcnow()),
-            "source": "Sys-Daemon",
-            "level": "INFO",
-            "message": "NetShield AI log streaming service initialized and actively monitoring databases."
-        })
-            
-        unified_logs.sort(key=lambda x: x["timestamp_obj"], reverse=True)
-        for log in unified_logs:
-            del log["timestamp_obj"]
-            
-        return {"status": "success", "logs": unified_logs[:50]}
-    except Exception as e:
-        print(f"Error fetching unified logs: {e}")
-        return {"status": "error", "message": str(e), "logs": []}
-
-# =========================================================
-# --- MONGODB PERSISTENT LOGS & SOC INCIDENT ENDPOINTS ---
-# =========================================================
-class UpdateAlertRequest(BaseModel):
-    status: Optional[str] = None
-    assignee: Optional[str] = None
-    note: Optional[str] = None
-
-@app.get("/api/alerts/history")
+@api.get('/alerts/history')
 def get_alert_history():
-    try:
-        anomalies = get_recent_anomalies(limit=50)
-        return {"status": "success", "anomalies": anomalies}
-    except Exception as e:
-        return {"status": "error", "message": str(e), "anomalies": []}
+    return {'status': 'success', 'anomalies': [storage.serialize(x) for x in storage.incident_logs.find(alert_query()).sort('timestamp', -1).limit(50)]}
 
-@app.get("/api/alerts")
-def get_soc_alerts(status: Optional[str] = Query(None)):
-    try:
-        query = {} if not status else {"status": status}
-        cursor = incident_logs.find(query).sort("timestamp", -1).limit(100)
-        alerts_list = []
-        for doc in cursor:
-            doc["id"] = str(doc["_id"])
-            del doc["_id"]
-            if "timestamp" in doc and isinstance(doc["timestamp"], datetime):
-                doc["timestamp"] = doc["timestamp"].isoformat()
-            if "time_formatted" in doc:
-                doc["time"] = doc.pop("time_formatted")
-            alerts_list.append(doc)
-            
-        return {"status": "success", "alerts": alerts_list}
-    except Exception as e:
-        return {"status": "error", "message": str(e), "alerts": []}
+@api.get('/alerts')
+def get_soc_alerts(status: str | None = None, include_simulated: bool = False,
+                   limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0, le=50000)):
+    query = alert_query(include_simulated)
+    if status:
+        if status not in {'Open', 'Investigating', 'False Positive', 'Closed'}:
+            raise HTTPException(422, 'Unsupported incident status')
+        query['status'] = status
+    count = storage.incident_logs.count_documents(query)
+    rows = storage.incident_logs.find(query).sort('timestamp', -1).skip(offset).limit(limit)
+    return {'status': 'success', 'alerts': [storage.serialize(x) for x in rows],
+            'total': count, 'limit': limit, 'offset': offset}
 
-@app.patch("/api/alerts/{alert_id}")
-def update_alert_status(alert_id: str, payload: UpdateAlertRequest):
-    try:
-        if not ObjectId.is_valid(alert_id):
-            raise HTTPException(status_code=400, detail="Invalid Alert ID format")
+@api.patch('/alerts/{alert_id}')
+def update_alert_status(alert_id: str, payload: UpdateAlertRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if not ObjectId.is_valid(alert_id): raise HTTPException(400, 'Invalid incident ID')
+    updates = {key: value for key, value in payload.model_dump(exclude_none=True).items() if key != 'note'}
+    if payload.assignee is not None and payload.assignee != 'Unassigned':
+        if not payload.assignee.isdecimal() or not db.query(User).filter(User.id == int(payload.assignee), User.is_active.is_(True)).first():
+            raise HTTPException(422, 'Choose an active team member as assignee')
+    if not updates and not payload.note: raise HTTPException(400, 'No changes supplied')
+    now = storage.utcnow().isoformat()
+    trail = {'timestamp': now, 'actor_id': user.id, 'changes': updates}
+    query = {'$push': {'audit_history': trail}}
+    if updates: query['$set'] = updates
+    if payload.note: query['$push']['investigation_notes'] = {'timestamp': now, 'actor_id': user.id, 'note': payload.note}
+    result = storage.incident_logs.update_one({'_id': ObjectId(alert_id)}, query)
+    if not result.matched_count: raise HTTPException(404, 'Incident not found')
+    return {'status': 'success', 'incident': storage.serialize(storage.incident_logs.find_one({'_id': ObjectId(alert_id)}))}
 
-        update_fields = {}
-        if payload.status: update_fields["status"] = payload.status
-        if payload.assignee: update_fields["assignee"] = payload.assignee
+@api.post('/alerts/acknowledge-all')
+def acknowledge_all_alerts(user: User = Depends(get_current_user)):
+    result = storage.incident_logs.update_many(
+        {**alert_query(), 'status': 'Open'},
+        {'$set': {'status': 'Investigating'},
+         '$push': {'audit_history': {'timestamp': storage.utcnow().isoformat(), 'actor_id': user.id, 'changes': {'status': 'Investigating'}}}})
+    return {'status': 'success', 'modified_count': result.modified_count}
 
-        update_query = {}
-        if update_fields: update_query["$set"] = update_fields
-        if payload.note:
-            update_query["$push"] = {"investigation_notes": {
-                "timestamp": datetime.utcnow().strftime("%Y-%m-%d %I:%M:%S %p"),
-                "note": payload.note
-            }}
+@api.get('/alerts/context/{source_ip}')
+def get_ip_context(source_ip: str, limit: int = Query(100, ge=1, le=500)):
+    query = {**alert_query(), 'source': source_ip}
+    count = storage.incident_logs.count_documents(query)
+    rows = [storage.serialize(x) for x in storage.incident_logs.find(query).sort('timestamp', -1).limit(limit)]
+    return {'status': 'success', 'source_ip': source_ip, 'history_count': count, 'incidents': rows,
+            'critical_incidents': storage.incident_logs.count_documents({**query, 'severity': 'Critical'}),
+            'attack_types_seen': storage.incident_logs.distinct('type', query)}
 
-        if not update_query:
-            raise HTTPException(status_code=400, detail="No fields provided for update")
-
-        result = incident_logs.update_one({"_id": ObjectId(alert_id)}, update_query)
-        if result.matched_count == 0:
-            raise HTTPException(status_code=404, detail="Alert incident not found")
-
-        return {"status": "success", "message": f"Alert {alert_id} updated successfully"}
-    except HTTPException: raise
-    except Exception as e: raise HTTPException(status_code=500, detail=str(e))
-    
-@app.get("/api/alerts/context/{source_ip}")
-def get_ip_context(source_ip: str):
-    try:
-        history = list(incident_logs.find({"source": source_ip}).sort("timestamp", -1))
-        if not history:
-            return {"status": "success", "source_ip": source_ip, "history_count": 0, "message": "First time seeing this IP."}
-            
-        attack_types = list(set([doc.get("type", "Unknown") for doc in history]))
-        critical_count = sum(1 for doc in history if doc.get("severity") == "Critical")
-        
-        return {
-            "status": "success", "source_ip": source_ip, "history_count": len(history),
-            "critical_incidents": critical_count, "first_seen": history[-1].get("time", "Unknown"),
-            "last_seen": history[0].get("time", "Unknown"), "attack_types_seen": attack_types
-        }
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-@app.get("/api/network/stats")
+@api.get('/network/stats')
 def get_network_stats():
-    try:
-        total_deviations = incident_logs.count_documents({})
-        recent_anomalies = get_recent_anomalies(limit=100)
-        critical_count = sum(1 for a in recent_anomalies if str(a.get("severity", "")).lower() in ["critical", "high"])
-        dynamic_risk = min(100, max(12, 12 + (critical_count * 7) + (len(recent_anomalies) * 2)))
-        
-        return {
-            "status": "success", "totalScanned": max(50, total_deviations * 24 + 112),
-            "totalDeviations": total_deviations, "criticalAnomalies": critical_count, "riskScore": int(dynamic_risk)
-        }
-    except Exception as e:
-        return {"status": "error", "totalScanned": 150, "totalDeviations": 0, "criticalAnomalies": 0, "riskScore": 12, "message": str(e)}
+    query = alert_query()
+    active = {**query, 'status': {'$in': ['Open', 'Investigating']}}
+    critical = storage.incident_logs.count_documents({**active, 'severity': {'$in': ['Critical', 'High']}})
+    # Explicit prioritization heuristic, not an attack probability.
+    peak = next((score for severity, score in [('Critical', 100), ('High', 75), ('Medium', 50)]
+                 if storage.incident_logs.count_documents({**active, 'severity': severity})), 0)
+    return {'status': 'success', 'totalScanned': storage.packet_logs.count_documents({**query, 'analyzed': True}),
+            'totalCaptured': storage.packet_logs.count_documents(query),
+            'totalDeviations': storage.incident_logs.count_documents(query), 'criticalAnomalies': critical,
+            'riskScore': peak, 'risk_method': 'Highest open-incident severity; not a probability',
+            'sources': broker.snapshot(), 'unit': 'flows'}
 
-@app.get("/api/alerts/trends")
-def get_threat_trends(attack_type: Optional[str] = Query(None)):
-    try:
-        match_stage = {}
-        if attack_type and attack_type != "All":
-            match_stage["type"] = attack_type
-            
-        pipeline = []
-        if match_stage:
-            pipeline.append({"$match": match_stage})
-            
-        pipeline.extend([
-            {"$addFields": {"parsed_date": {"$toDate": "$timestamp"}}},
-            {"$group": {
-                "_id": {"$isoWeek": "$parsed_date"},
-                "total_attacks": {"$sum": 1},
-                "high_critical_attacks": {"$sum": {"$cond": [{"$in": ["$severity", ["Critical", "High"]]}, 1, 0]}}
-            }},
-            {"$sort": {"_id": 1}}
-        ])
-        
-        results = list(incident_logs.aggregate(pipeline))
-        unique_types = incident_logs.distinct("type")
-        
-        labels = [f"Week {r['_id']}" if r['_id'] else "Unknown Week" for r in results]
-        total_data = [r['total_attacks'] for r in results]
-        critical_data = [r['high_critical_attacks'] for r in results]
-        
-        return {
-            "status": "success", "labels": labels, "total_data": total_data, 
-            "critical_data": critical_data, "available_types": unique_types
-        }
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+@api.get('/network/status')
+def network_status():
+    return {'status': 'success', 'sources': broker.snapshot()}
 
-@app.get("/api/alerts/matrix")
-async def get_threat_matrix():
-    try:
-        alerts = list(incident_logs.find({}, {"_id": 0, "source": 1, "type": 1}))
-        ip_counts = Counter([a.get("source", "Unknown") for a in alerts])
-        type_counts = Counter([a.get("type", "Unknown") for a in alerts])
-        top_ips = [ip for ip, _ in ip_counts.most_common(3)]
-        top_types = [t for t, _ in type_counts.most_common(3)]
-        while len(top_ips) < 3: top_ips.append("-")
-        while len(top_types) < 3: top_types.append("-")
-        
-        matrix = []
-        for ip in top_ips:
-            row = []
-            for t in top_types:
-                if ip == "-" or t == "-":
-                    row.append(0.0)
-                else:
-                    match = sum(1 for a in alerts if a.get("source") == ip and a.get("type") == t)
-                    row.append(round(match / ip_counts[ip], 2))
-            matrix.append(row)
-            
-        return {"status": "success", "assets": top_ips, "vectors": top_types, "matrix": matrix}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+@api.get('/alerts/trends')
+def get_threat_trends(attack_type: str | None = None):
+    query = alert_query()
+    if attack_type and attack_type != 'All': query['type'] = attack_type
+    pipeline = [
+        {'$match': query},
+        {'$group': {'_id': {'$dateToString': {'format': '%G-W%V', 'date': '$timestamp', 'timezone': 'UTC'}},
+                    'total_attacks': {'$sum': 1},
+                    'high_critical_attacks': {'$sum': {'$cond': [{'$in': ['$severity', ['Critical', 'High']]}, 1, 0]}}}},
+        {'$sort': {'_id': -1}}, {'$limit': 52}, {'$sort': {'_id': 1}},
+    ]
+    rows = list(storage.incident_logs.aggregate(pipeline))
+    return {'status': 'success', 'labels': [x['_id'] for x in rows],
+            'total_data': [x['total_attacks'] for x in rows], 'critical_data': [x['high_critical_attacks'] for x in rows],
+            'available_types': storage.incident_logs.distinct('type', alert_query())}
 
-@app.get("/api/alerts/forecast")
-async def get_threat_forecast():
-    try:
-        total_alerts = incident_logs.count_documents({})
-        base = max(10, total_alerts // 2)
-        labels = ['T-6h', 'T-5h', 'T-4h', 'T-3h', 'T-2h', 'T-1h', 'Now', '+1h (Proj)', '+2h (Proj)']
-        data = [
-            max(0, base - 12), base - 5, base + 2, base - 1, base + 8, base + 15, 
-            base + 20, int((base + 20) * 1.15), int((base + 20) * 1.25)  
-        ]
-        return {"status": "success", "labels": labels, "data": data}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+@api.get('/alerts/matrix')
+def get_threat_matrix():
+    rows = list(storage.incident_logs.aggregate([
+        {'$match': alert_query()}, {'$group': {'_id': {'source': '$source', 'type': '$type'}, 'count': {'$sum': 1}}},
+        {'$sort': {'count': -1}}, {'$limit': 1000},
+    ]))
+    ips, types = Counter(), Counter()
+    for row in rows:
+        ips[row['_id']['source']] += row['count']
+        types[row['_id']['type']] += row['count']
+    assets = [key for key, _ in ips.most_common(3)]
+    vectors = [key for key, _ in types.most_common(3)]
+    counts = {(x['_id']['source'], x['_id']['type']): x['count'] for x in rows}
+    return {'status': 'success', 'assets': assets, 'vectors': vectors, 'measure': 'Observed share, not future probability',
+            'matrix': [[round(counts.get((ip, kind), 0) / ips[ip], 3) for kind in vectors] for ip in assets]}
 
-@app.get("/api/users")
-def get_all_users(db: Session = Depends(get_db)):
-    users = db.query(User).all()
-    user_list = [{"id": u.id, "username": u.username, "full_name": u.full_name, "role": u.role, "email": u.email, "is_active": u.is_active} for u in users]
-    return {"status": "success", "users": user_list}
-# =========================================================
-# --- REAL-TIME RETRAINING PIPELINE STATE TRACKER ---
-# =========================================================
-retrain_pipeline_state = {
-    "is_active": False,
-    "current_step": 0,
-    "status_text": "System Idle"
-}
+@api.get('/alerts/forecast')
+def get_threat_forecast():
+    return {'status': 'unavailable', 'labels': [], 'data': [], 'message': 'Intrusion forecasting has not been validated'}
 
-@app.get("/api/models/retrain-status")
+@api.get('/models/retrain-status')
 def get_retraining_status():
-    return retrain_pipeline_state
+    return {'is_active': False, 'current_step': 0, 'status_text': 'Retraining is not available', 'supported': False}
 
-@app.get("/api/models/retrain-status")
-def get_retraining_status():
-    return retrain_pipeline_state
+@api.post('/models/retrain')
+def trigger_global_retraining(admin: User = Depends(require_admin)):
+    raise HTTPException(501, 'Retraining requires a versioned training and validation pipeline')
 
-@app.post("/api/models/retrain")
-async def trigger_global_retraining(background_tasks: BackgroundTasks):
-    global retrain_pipeline_state
-    if retrain_pipeline_state["is_active"]:
-        return {"status": "error", "message": "Pipeline already active"}
-
-    def execute_pipeline_stages():
-        global retrain_pipeline_state
-        try:
-            retrain_pipeline_state["is_active"] = True
-            time.sleep(1.2)
-            retrain_pipeline_state["current_step"] = 1
-            retrain_pipeline_state["status_text"] = "Parsing live PCAP & Logs..."
-            time.sleep(1.5)
-            retrain_pipeline_state["current_step"] = 2
-            retrain_pipeline_state["status_text"] = "Vectorizing network behavior..."
-            time.sleep(2.0)
-            retrain_pipeline_state["current_step"] = 3
-            retrain_pipeline_state["status_text"] = "Executing Scikit/XGBoost Sync..."
-            time.sleep(1.2)
-            retrain_pipeline_state["current_step"] = 4
-            retrain_pipeline_state["status_text"] = "Checking precision and recall..."
-            time.sleep(1.0)
-            retrain_pipeline_state["current_step"] = 5
-            retrain_pipeline_state["status_text"] = "Hot-swapping production weights..."
-        finally:
-            time.sleep(0.5)
-            retrain_pipeline_state["is_active"] = False
-            retrain_pipeline_state["current_step"] = 0
-            retrain_pipeline_state["status_text"] = "Pipeline Idle"
-
-    background_tasks.add_task(execute_pipeline_stages)
-    return {"status": "success", "message": "Continuous training pipeline started."}
-
-@app.get("/api/models/telemetry")
+@api.get('/models/telemetry')
 def get_model_telemetry():
-    try:
-        cicids_acc = 98.92
-        if os.path.exists("cicids_metrics.json"):
-            with open("cicids_metrics.json", "r") as f:
-                cicids_acc = float(json.load(f).get("accuracy", 98.92))
+    models = []
+    for dataset, name in [('cicids2017', 'Random Forest (CICIDS2017)'), ('unsw-nb15', 'XGBoost (UNSW-NB15)')]:
+        loaded = detector.engines.get(dataset)
+        models.append({'id': dataset, 'name': name, 'version': loaded.version if loaded else 'Unavailable',
+                       'type': 'Supervised classification', 'accuracy': None,
+                       'status': 'Loaded' if loaded else 'Offline', 'latency': 'Not measured', 'lastUpdated': 'Startup load'})
+    return {'status': 'success', 'global_accuracy': 'Not verified', 'active_models_count': len(detector.engines),
+            'inference_latency': 'Per-event timing', 'models': models}
 
-        unsw_acc = 96.50
-        if os.path.exists("unsw_metrics.json"):
-            with open("unsw_metrics.json", "r") as f:
-                unsw_acc = float(json.load(f).get("accuracy", 96.50))
+@api.get('/models/flow-candidate')
+def get_flow_candidate():
+    return {'status': 'success', **flow_candidate.status(),
+            'evaluation': flow_candidate.report}
 
-        active_count = sum(1 for m in [rf_model, xgb_model] if m is not None)
-        global_acc = round((cicids_acc + unsw_acc) / 2, 1) if active_count > 0 else 0.0
+@api.get('/users')
+def get_all_users(db: Session = Depends(get_db)):
+    return {'status': 'success', 'users': [{**user_payload(x), 'is_active': x.is_active} for x in db.query(User).all()]}
 
-        return {
-            "status": "success", "global_accuracy": f"{global_acc}%", "active_models_count": active_count,
-            "inference_latency": "< 20 ms",
-            "models": [
-                { "id": "mdl_rf_01", "name": "Random Forest (CICIDS2017)", "version": "v1.9.0-opt", "type": "DDoS & Intrusion", "accuracy": cicids_acc, "status": "Deployed" if rf_model is not None else "Offline", "latency": "12ms", "lastUpdated": "Loaded in Memory" },
-                { "id": "mdl_xgb_02", "name": "XGBoost (UNSW-NB15)", "version": "v2.0.0-prod", "type": "Zero-Day Prediction", "accuracy": unsw_acc, "status": "Deployed" if xgb_model is not None else "Offline", "latency": "16ms", "lastUpdated": "Loaded in Memory" }
-            ]
-        }
-    except Exception as e: raise HTTPException(status_code=500, detail=str(e))
+@api.post('/users/invite')
+def invite_team_member(payload: InviteRequest, admin: User = Depends(require_admin)):
+    raise HTTPException(501, 'Invitations are not available yet; users can register as analysts')
 
-@app.get("/api/system/devices")
-def get_system_devices():
-    return {"status": "success", "devices": [
-        { "id": "dev_01", "name": "NetShield API Gateway", "ip": "127.0.0.1:8000", "mac": "-", "type": "FastAPI Server", "status": "Online", "load": "12%" },
-        { "id": "dev_02", "name": "Auth & Audit Logs", "ip": "127.0.0.1:5432", "mac": "-", "type": "PostgreSQL", "status": "Online", "load": "5%" },
-        { "id": "dev_03", "name": "Threat Intelligence", "ip": "127.0.0.1:27017", "mac": "-", "type": "MongoDB", "status": "Online", "load": "8%" },
-        { "id": "dev_04", "name": "Primary Capture Interface", "ip": "192.168.1.0/24", "mac": "enp39s0", "type": "Network Interface", "status": "Online", "load": "44%" }
-    ]}
+@api.put('/users/profile')
+def update_user_profile(payload: ProfileUpdateRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    email = str(payload.email).lower()
+    if db.query(User).filter(User.email == email, User.id != user.id).first():
+        raise HTTPException(409, 'Email is already registered')
+    user.full_name, user.email = payload.full_name.strip(), email
+    audit(db, user, 'PROFILE_UPDATED', user.username)
+    db.commit()
+    return {'status': 'success', 'user': user_payload(user)}
 
-@app.get("/api/system/settings")
-def get_system_settings():
-    return {"status": "success", "settings": system_settings_db}
+@api.put('/users/password')
+def update_user_password(payload: PasswordUpdateRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if not verify_password(payload.current_password, user.hashed_password): raise HTTPException(400, 'Incorrect current password')
+    user.hashed_password = hash_password(payload.new_password)
+    audit(db, user, 'PASSWORD_CHANGED', user.username, 'Existing access tokens invalidated')
+    db.commit()
+    return {'status': 'success', 'message': 'Password changed. Sign in again.'}
 
-@app.put("/api/system/settings")
-def update_system_settings(settings: dict):
-    global system_settings_db
-    system_settings_db.update(settings)
-    return {"status": "success", "message": "Settings updated successfully"}        
+@api.get('/users/sessions')
+def get_user_sessions(request: Request, user: User = Depends(get_current_user)):
+    return {'status': 'success', 'sessions': [{'id': 'current', 'device': request.headers.get('user-agent', 'Current browser'),
+            'location': 'Not determined', 'ip': request.client.host if request.client else 'Unknown',
+            'time': 'Current request', 'active': True}], 'message': 'Session inventory is not implemented'}
 
-@app.post("/api/alerts/acknowledge-all")
-def acknowledge_all_alerts():
-    try:
-        result = incident_logs.update_many({"status": "Open"}, {"$set": {"status": "Investigating", "assignee": "Admin (Auto-Ack)"}})
-        return {"status": "success", "modified_count": result.modified_count, "message": f"Acknowledged {result.modified_count} open incidents."}
-    except Exception as e: raise HTTPException(status_code=500, detail=str(e))
+@api.put('/users/{target_user_id}')
+def update_user_management(target_user_id: int, payload: UserUpdateRequest, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
+    # Lock active users so two administrators cannot simultaneously remove all admins.
+    users = db.query(User).order_by(User.id).with_for_update().all()
+    target = next((x for x in users if x.id == target_user_id), None)
+    if not target: raise HTTPException(404, 'User not found')
+    removes_admin = normalize_role(target.role) == 'administrator' and target.is_active and (not payload.is_active or payload.role != 'administrator')
+    admins = sum(x.is_active and normalize_role(x.role) == 'administrator' for x in users)
+    if removes_admin and (target.id == admin.id or admins <= 1):
+        raise HTTPException(409, 'Cannot remove your own access or the final active administrator')
+    target.role, target.is_active = payload.role, payload.is_active
+    audit(db, admin, 'USER_MODIFIED', str(target.id), f'role={payload.role}; active={payload.is_active}')
+    db.commit()
+    return {'status': 'success', 'message': 'User updated'}
 
-@app.post("/api/users/invite")
-def invite_team_member(payload: InviteRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
-    try:
-        existing_user = db.query(User).filter(User.email == payload.email).first()
-        if existing_user: raise HTTPException(status_code=400, detail="User with this email already exists.")
-        log_audit_action(db, 1, "MEMBER_INVITED", payload.email, f"Invitation dispatched for role: {payload.role}")
-        return {"status": "success", "message": f"Invitation securely dispatched to {payload.email}"}
-    except HTTPException: raise
-    except Exception as e: raise HTTPException(status_code=500, detail=str(e))
+@api.get('/system/settings')
+def get_system_settings(admin: User = Depends(require_admin)):
+    return {'status': 'success', 'settings': {'tokenExpiryMinutes': settings.token_minutes,
+            'monitoringSources': list(settings.monitoring_datasets), 'mfaEnabled': False, 'autoBanEnabled': False,
+            'retrainingSupported': False, 'invitationsSupported': False, 'retentionEnforced': False},
+            'editable': False}
 
-@app.put("/api/users/profile")
-def update_user_profile(payload: ProfileUpdateRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    try:
-        existing = db.query(User).filter(User.email == payload.email, User.id != current_user.id).first()
-        if existing: raise HTTPException(status_code=400, detail="Email address is already in use by another account.")
-        current_user.full_name = payload.full_name
-        current_user.email = payload.email
-        db.commit()
-        db.refresh(current_user)
-        log_audit_action(db, current_user.id, "PROFILE_UPDATED", current_user.email, "User updated their personal profile information")
-        return {"status": "success", "user": {"id": current_user.id, "full_name": current_user.full_name, "email": current_user.email, "role": current_user.role, "username": current_user.username}}
-    except HTTPException: raise
-    except Exception as e: raise HTTPException(status_code=500, detail=str(e))
+@api.put('/system/settings')
+def update_system_settings(admin: User = Depends(require_admin)):
+    raise HTTPException(501, 'Runtime configuration changes are not supported')
 
-@app.get("/api/users/sessions")
-def get_user_sessions(request: Request, current_user: User = Depends(get_current_user)):
-    try:
-        client_ip = request.client.host
-        user_agent = request.headers.get('user-agent', 'Unknown Device')
-        device_name = "Desktop Interface"
-        if "Macintosh" in user_agent: device_name = "Apple MacBook Air - Safari/Chrome"
-        elif "Windows" in user_agent: device_name = "Windows PC - Chrome/Edge"
-        elif "iPhone" in user_agent: device_name = "iPhone - Safari"
-        elif "Android" in user_agent: device_name = "Android Device"
+@api.get('/system/devices')
+def get_system_devices(db: Session = Depends(get_db)):
+    devices = [{'id': 'api', 'name': 'NetShield API', 'ip': 'Application', 'mac': '-', 'type': 'API',
+                'status': 'Online', 'load': 'Not measured'}]
+    for key, name, probe in [('sql', 'Accounts database', lambda: db.execute(text('SELECT 1'))),
+                              ('mongo', 'Incident database', lambda: storage.client.admin.command('ping'))]:
+        try:
+            probe()
+            state = 'Online'
+        except (SQLAlchemyError, PyMongoError):
+            db.rollback()
+            state = 'Unavailable'
+        devices.append({'id': key, 'name': name, 'ip': 'Private service', 'mac': '-', 'type': 'Database', 'status': state, 'load': 'Not measured'})
+    return {'status': 'success', 'devices': devices}
 
-        sessions = [{"id": f"sess_{current_user.id}_primary", "device": device_name, "location": "Udaipur, Rajasthan, India", "time": "Current Session", "ip": client_ip, "active": True}]
-        return {"status": "success", "sessions": sessions}
-    except Exception as e: raise HTTPException(status_code=500, detail=str(e))     
+@api.get('/logs')
+def get_unified_system_logs(db: Session = Depends(get_db), admin: User = Depends(require_admin)):
+    logs = [{'id': str(row.id), 'timestamp': row.timestamp.replace(tzinfo=row.timestamp.tzinfo or timezone.utc).isoformat(),
+             'source': 'Audit', 'level': 'INFO', 'message': f'{row.action}: {row.target}'}
+            for row in db.query(AuditLog).order_by(AuditLog.timestamp.desc()).limit(100)]
+    return {'status': 'success', 'logs': logs}
 
-@app.put("/api/users/password")
-def update_user_password(payload: PasswordUpdateRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    try:
-        if not verify_password(payload.current_password, current_user.hashed_password):
-            raise HTTPException(status_code=400, detail="Incorrect current password.")
-        current_user.hashed_password = hash_password(payload.new_password)
-        db.commit()
-        log_audit_action(db, current_user.id, "PASSWORD_CHANGED", current_user.email, "User successfully updated their account password.")
-        return {"status": "success", "message": "Password updated successfully."}
-    except HTTPException: raise
-    except Exception as e: raise HTTPException(status_code=500, detail=str(e))           
+def csv_cell(value):
+    value = '' if value is None else str(value)
+    return "'" + value if value.lstrip().startswith(('=', '+', '-', '@', '\t', '\r', '\n')) else value
 
-@app.put("/api/users/{target_user_id}")
-def update_user_management(target_user_id: int, payload: UserUpdateRequest, db: Session = Depends(get_db), admin_user: User = Depends(require_admin)):
-    try:
-        target_user = db.query(User).filter(User.id == target_user_id).first()
-        if not target_user: raise HTTPException(status_code=404, detail="User not found in the database.")
-        if target_user.id == admin_user.id and not payload.is_active:
-            raise HTTPException(status_code=400, detail="You cannot suspend your own admin account.")
-        target_user.role = payload.role
-        target_user.is_active = payload.is_active
-        db.commit()
-        status_text = "Active" if payload.is_active else "Suspended"
-        log_audit_action(db, admin_user.id, "USER_MODIFIED", target_user.email, f"Updated role to {payload.role}, Account Status: {status_text}")
-        return {"status": "success", "message": f"Successfully updated {target_user.full_name}."}
-    except HTTPException: raise
-    except Exception as e: raise HTTPException(status_code=500, detail=str(e))
+@api.get('/alerts/export')
+def export_alerts_csv(include_simulated: bool = False, limit: int = Query(1000, ge=1, le=10000),
+                      user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    query = alert_query(include_simulated)
+    count = storage.incident_logs.count_documents(query)
+    if count > limit: raise HTTPException(422, f'{count} incidents exceed the export limit of {limit}; increase limit up to 10000')
+    stream = io.StringIO()
+    writer = csv.writer(stream)
+    writer.writerow(['Timestamp UTC', 'Threat Vector', 'Source', 'Severity', 'Confidence', 'Assignee', 'Status', 'Simulated', 'Incident ID'])
+    for raw in storage.incident_logs.find(query).sort('timestamp', -1).limit(limit):
+        doc = storage.serialize(raw)
+        writer.writerow([csv_cell(doc.get(key)) for key in ['timestamp', 'type', 'source', 'severity', 'confidence', 'assignee', 'status', 'simulated', 'id']])
+    audit(db, user, 'EXPORT_INCIDENTS', 'CSV', f'{count} incidents')
+    db.commit()
+    return StreamingResponse(iter([stream.getvalue()]), media_type='text/csv',
+                             headers={'Content-Disposition': 'attachment; filename=netshield-incidents.csv'})
 
-@app.get("/api/alerts/export")
-def export_alerts_csv():
-    try:
-        alerts = list(incident_logs.find({}).sort("timestamp", -1).limit(1000))
-        stream = io.StringIO()
-        csv_writer = csv.writer(stream)
-        csv_writer.writerow(['Timestamp', 'Threat Vector', 'Source IP', 'Severity', 'AI Confidence', 'Assignee', 'Triage Status'])
-        for alert in alerts:
-            raw_time = alert.get("time") or alert.get("time_formatted") or alert.get("timestamp")
-            time_str = raw_time.strftime("%Y-%m-%d %I:%M:%S %p") if isinstance(raw_time, datetime) else str(raw_time) if raw_time else "N/A"
-            csv_writer.writerow([time_str, alert.get("type", "Unknown"), alert.get("source", "Unknown"), alert.get("severity", "Unknown"), alert.get("confidence", "Unknown"), alert.get("assignee", "Unassigned"), alert.get("status", "Open")])
-        stream.seek(0)
-        response = StreamingResponse(iter([stream.getvalue()]), media_type="text/csv")
-        response.headers["Content-Disposition"] = f"attachment; filename=SOC_Threat_Intelligence_{datetime.now().strftime('%Y-%m-%d')}.csv"
-        return response
-    except Exception as e: raise HTTPException(status_code=500, detail=f"Failed to generate report: {str(e)}")
+app.include_router(api)
