@@ -31,8 +31,10 @@
   },
   "live_interface": {
     "interface_discovered": "en0",
-    "capture_run": false,
-    "reason": "macOS capture device requires administrator authorization; sudo -n reported that a password is required"
+    "capture_run": true,
+    "requested_duration_completed": true,
+    "capture_duration_seconds": 60.136,
+    "evidence": "sensor/live-validation-2026-11-20.json"
   },
-  "scope": "Real Zeek offline PCAP processing and sustained fixture log ingestion; in-memory database substitutes; live NIC capacity and real database deployment not validated"
+  "scope": "Offline Zeek and fixture regression checks plus independently reconciled 60-second live en0 observation; production capacity and real database deployment remain unvalidated"
 }

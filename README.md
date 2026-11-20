@@ -155,7 +155,9 @@ If using the existing local backend/venv, substitute that interpreter path. Test
 
 The existing local model artifacts load and produce sample predictions, but emit scikit-learn/XGBoost serialization-version warnings. Re-export/retrain models in a pinned, reproduced environment before treating their results as production validated.
 
-Docker configuration was reviewed statically in this development environment; Docker itself was unavailable. Real PostgreSQL/Mongo deployment, sustained capture, packet-loss measurement, backup/restore, held-out ML evaluation, and cloud deployment remain to be validated.
+The completed 60-second live `en0` check processed 1,875 packets into 94 connection records (53 TCP, 41 UDP), with no local capture drops, unprocessed packets, TCP gap events, duplicate records, malformed lines, or unread log bytes reported. The raw connection packet counters account for 1,871 packets; these logs do not establish why four processed packets have no connection attribution, and that difference is not evidence of capture loss. Shutdown counts and interval statistics were reconciled independently. Aggregate evidence and source-log checksums are saved in `sensor/live-validation-2026-11-20.json`; private endpoint records remain outside Git.
+
+Docker configuration was reviewed statically in this development environment; Docker itself was unavailable. Longer capture observations under load, real PostgreSQL/Mongo deployment, backup/restore, held-out ML evaluation, and cloud deployment remain to be validated. A successful one-minute local capture does not establish network-wide losslessness or production capacity.
 
 ## Next milestones
 
